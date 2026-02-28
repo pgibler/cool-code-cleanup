@@ -91,6 +91,16 @@ func runCommand(cmdName string, args []string) error {
 	detectBoolFlagSet(fs, "safe", &cliOpts.SafeSet)
 	detectBoolFlagSet(fs, "aggressive", &cliOpts.AggressiveSet)
 	detectBoolFlagSet(fs, "dry-run", &cliOpts.DryRunSet)
+	if cmdName == "cleanup" {
+		detectBoolFlagSet(fs, "remove-redundant-guards", &cleanupFlags.RemoveRedundantSet)
+		detectBoolFlagSet(fs, "dry-refactor", &cleanupFlags.DryRefactorSet)
+		detectBoolFlagSet(fs, "harden-error-handling", &cleanupFlags.HardenErrorSet)
+		detectBoolFlagSet(fs, "gate-features-env", &cleanupFlags.GateFeaturesSet)
+		detectBoolFlagSet(fs, "split-functions", &cleanupFlags.SplitFunctionsSet)
+		detectBoolFlagSet(fs, "standardize-naming", &cleanupFlags.StandardizeNamingSet)
+		detectBoolFlagSet(fs, "simplify-complex-logic", &cleanupFlags.SimplifyLogicSet)
+		detectBoolFlagSet(fs, "detect-expensive-functions", &cleanupFlags.DetectExpensiveSet)
+	}
 	if cmdName == "profile" {
 		profileFlags.IncludeRoutes = parseCSV(includeCSV)
 		profileFlags.IgnoreRoutes = parseCSV(ignoreCSV)

@@ -139,6 +139,15 @@ func Resolve(cli CLIOverrides) (Effective, error) {
 	effective.SourceChains["cleanup.edit_permission_mode"] = []string{SourceDefault}
 	effective.SourceChains["openai.model"] = []string{SourceDefault}
 	effective.SourceChains["profile.short_circuit_env_var"] = []string{SourceDefault}
+	effective.SourceChains["profile.dependency_short_circuit"] = []string{SourceDefault}
+	effective.SourceChains["cleanup.remove_redundant_guards"] = []string{SourceDefault}
+	effective.SourceChains["cleanup.dry_refactor"] = []string{SourceDefault}
+	effective.SourceChains["cleanup.harden_error_handling"] = []string{SourceDefault}
+	effective.SourceChains["cleanup.gate_features_env"] = []string{SourceDefault}
+	effective.SourceChains["cleanup.split_functions"] = []string{SourceDefault}
+	effective.SourceChains["cleanup.standardize_naming"] = []string{SourceDefault}
+	effective.SourceChains["cleanup.simplify_complex_logic"] = []string{SourceDefault}
+	effective.SourceChains["cleanup.detect_expensive_functions"] = []string{SourceDefault}
 
 	cfgFile, exists, err := loadConfigFile(cli.ConfigPath)
 	if err != nil {
@@ -204,6 +213,42 @@ func mergeConfig(base Config, overlay Config, chains map[string][]string, source
 		base.Cleanup.EditPermissionMode = overlay.Cleanup.EditPermissionMode
 		chains["cleanup.edit_permission_mode"] = append(chains["cleanup.edit_permission_mode"], source)
 	}
+	if overlay.Profile.DependencyShortCircuit != base.Profile.DependencyShortCircuit {
+		base.Profile.DependencyShortCircuit = overlay.Profile.DependencyShortCircuit
+		chains["profile.dependency_short_circuit"] = append(chains["profile.dependency_short_circuit"], source)
+	}
+	if overlay.Cleanup.RemoveRedundantGuards != base.Cleanup.RemoveRedundantGuards {
+		base.Cleanup.RemoveRedundantGuards = overlay.Cleanup.RemoveRedundantGuards
+		chains["cleanup.remove_redundant_guards"] = append(chains["cleanup.remove_redundant_guards"], source)
+	}
+	if overlay.Cleanup.DryRefactor != base.Cleanup.DryRefactor {
+		base.Cleanup.DryRefactor = overlay.Cleanup.DryRefactor
+		chains["cleanup.dry_refactor"] = append(chains["cleanup.dry_refactor"], source)
+	}
+	if overlay.Cleanup.HardenErrorHandling != base.Cleanup.HardenErrorHandling {
+		base.Cleanup.HardenErrorHandling = overlay.Cleanup.HardenErrorHandling
+		chains["cleanup.harden_error_handling"] = append(chains["cleanup.harden_error_handling"], source)
+	}
+	if overlay.Cleanup.GateFeaturesEnv != base.Cleanup.GateFeaturesEnv {
+		base.Cleanup.GateFeaturesEnv = overlay.Cleanup.GateFeaturesEnv
+		chains["cleanup.gate_features_env"] = append(chains["cleanup.gate_features_env"], source)
+	}
+	if overlay.Cleanup.SplitFunctions != base.Cleanup.SplitFunctions {
+		base.Cleanup.SplitFunctions = overlay.Cleanup.SplitFunctions
+		chains["cleanup.split_functions"] = append(chains["cleanup.split_functions"], source)
+	}
+	if overlay.Cleanup.StandardizeNaming != base.Cleanup.StandardizeNaming {
+		base.Cleanup.StandardizeNaming = overlay.Cleanup.StandardizeNaming
+		chains["cleanup.standardize_naming"] = append(chains["cleanup.standardize_naming"], source)
+	}
+	if overlay.Cleanup.SimplifyComplexLogic != base.Cleanup.SimplifyComplexLogic {
+		base.Cleanup.SimplifyComplexLogic = overlay.Cleanup.SimplifyComplexLogic
+		chains["cleanup.simplify_complex_logic"] = append(chains["cleanup.simplify_complex_logic"], source)
+	}
+	if overlay.Cleanup.DetectExpensive != base.Cleanup.DetectExpensive {
+		base.Cleanup.DetectExpensive = overlay.Cleanup.DetectExpensive
+		chains["cleanup.detect_expensive_functions"] = append(chains["cleanup.detect_expensive_functions"], source)
+	}
 	if len(overlay.Profile.IncludeRoutes) > 0 {
 		base.Profile.IncludeRoutes = dedupe(overlay.Profile.IncludeRoutes)
 		appendSourceIfMissing(chains, "profile.include_routes", source)
@@ -252,7 +297,39 @@ func applyEnv(e *Effective) {
 	}
 	if shortCircuit, ok := boolEnv("CCC_PROFILE_SHORT_CIRCUIT"); ok {
 		e.Config.Profile.DependencyShortCircuit = shortCircuit
-		e.SourceChains["profile.dependency_short_circuit"] = []string{SourceEnv}
+		e.SourceChains["profile.dependency_short_circuit"] = append(e.SourceChains["profile.dependency_short_circuit"], SourceEnv)
+	}
+	if v, ok := boolEnv("CCC_CLEANUP_REMOVE_REDUNDANT_GUARDS"); ok {
+		e.Config.Cleanup.RemoveRedundantGuards = v
+		e.SourceChains["cleanup.remove_redundant_guards"] = append(e.SourceChains["cleanup.remove_redundant_guards"], SourceEnv)
+	}
+	if v, ok := boolEnv("CCC_CLEANUP_DRY_REFACTOR"); ok {
+		e.Config.Cleanup.DryRefactor = v
+		e.SourceChains["cleanup.dry_refactor"] = append(e.SourceChains["cleanup.dry_refactor"], SourceEnv)
+	}
+	if v, ok := boolEnv("CCC_CLEANUP_HARDEN_ERROR_HANDLING"); ok {
+		e.Config.Cleanup.HardenErrorHandling = v
+		e.SourceChains["cleanup.harden_error_handling"] = append(e.SourceChains["cleanup.harden_error_handling"], SourceEnv)
+	}
+	if v, ok := boolEnv("CCC_CLEANUP_GATE_FEATURES_ENV"); ok {
+		e.Config.Cleanup.GateFeaturesEnv = v
+		e.SourceChains["cleanup.gate_features_env"] = append(e.SourceChains["cleanup.gate_features_env"], SourceEnv)
+	}
+	if v, ok := boolEnv("CCC_CLEANUP_SPLIT_FUNCTIONS"); ok {
+		e.Config.Cleanup.SplitFunctions = v
+		e.SourceChains["cleanup.split_functions"] = append(e.SourceChains["cleanup.split_functions"], SourceEnv)
+	}
+	if v, ok := boolEnv("CCC_CLEANUP_STANDARDIZE_NAMING"); ok {
+		e.Config.Cleanup.StandardizeNaming = v
+		e.SourceChains["cleanup.standardize_naming"] = append(e.SourceChains["cleanup.standardize_naming"], SourceEnv)
+	}
+	if v, ok := boolEnv("CCC_CLEANUP_SIMPLIFY_COMPLEX_LOGIC"); ok {
+		e.Config.Cleanup.SimplifyComplexLogic = v
+		e.SourceChains["cleanup.simplify_complex_logic"] = append(e.SourceChains["cleanup.simplify_complex_logic"], SourceEnv)
+	}
+	if v, ok := boolEnv("CCC_CLEANUP_DETECT_EXPENSIVE_FUNCTIONS"); ok {
+		e.Config.Cleanup.DetectExpensive = v
+		e.SourceChains["cleanup.detect_expensive_functions"] = append(e.SourceChains["cleanup.detect_expensive_functions"], SourceEnv)
 	}
 }
 

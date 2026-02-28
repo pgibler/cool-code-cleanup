@@ -3,11 +3,12 @@ package tui
 import "fmt"
 
 type ToggleItem struct {
-	ID             string
-	Label          string
-	Details        []string
-	Enabled        bool
-	DisabledReason string
+	ID                   string
+	Label                string
+	Details              []string
+	Enabled              bool
+	DisabledReason       string
+	ClearDetailsOnToggle bool
 }
 
 func (i ToggleItem) Selectable() bool {
@@ -45,6 +46,9 @@ func (l *ToggleList) ToggleCurrent() (changed bool, reason string) {
 		return false, item.DisabledReason
 	}
 	item.Enabled = !item.Enabled
+	if item.ClearDetailsOnToggle {
+		item.Details = nil
+	}
 	return true, ""
 }
 
@@ -72,11 +76,16 @@ func (l ToggleList) RenderLines() []string {
 			status = "[x]"
 		}
 		line := fmt.Sprintf("%s %s %s", cursor, status, item.Label)
+		detailStart := 0
+		if len(item.Details) > 0 {
+			line = fmt.Sprintf("%s | %s", line, item.Details[0])
+			detailStart = 1
+		}
 		if !item.Selectable() {
 			line = fmt.Sprintf("%s (disabled: %s)", line, item.DisabledReason)
 		}
 		lines = append(lines, line)
-		for _, d := range item.Details {
+		for _, d := range item.Details[detailStart:] {
 			lines = append(lines, fmt.Sprintf("    - %s", d))
 		}
 	}

@@ -21,9 +21,9 @@ func TestStepScreenRenderIncludesRequiredSections(t *testing.T) {
 	}
 
 	out := screen.Render()
-	for _, required := range []string{"== Step ==", "== Description ==", "== Content ==", "== Actions =="} {
+	for _, required := range []string{"[Profile] Step 1a: Profiling Options", "Review effective options and sources.", "safe=true (source: default -> cli)", "Actions:"} {
 		if !strings.Contains(out, required) {
-			t.Fatalf("render missing section: %s\n%s", required, out)
+			t.Fatalf("render missing content: %s\n%s", required, out)
 		}
 	}
 }
@@ -58,5 +58,25 @@ func TestToggleListMoveSkipsDisabledItems(t *testing.T) {
 	l.MoveDown()
 	if l.Cursor != 1 {
 		t.Fatalf("expected cursor to remain on only selectable item, got %d", l.Cursor)
+	}
+}
+
+func TestToggleListClearsDerivationDetailsOnToggle(t *testing.T) {
+	l := NewToggleList([]ToggleItem{
+		{
+			ID:                   "opt",
+			Label:                "Option",
+			Enabled:              true,
+			Details:              []string{"source chain: default -> env"},
+			ClearDetailsOnToggle: true,
+		},
+	})
+
+	changed, reason := l.ToggleCurrent()
+	if !changed || reason != "" {
+		t.Fatalf("expected toggle success")
+	}
+	if len(l.Items[0].Details) != 0 {
+		t.Fatalf("expected details to be cleared after toggle")
 	}
 }
