@@ -29,6 +29,10 @@ type ProfileFlags struct {
 	DependencyShortCircuit bool
 	EditPermissionMode     string
 	AutoApply              bool
+	CreateBranch           bool
+	CreateBranchSet        bool
+	CommitChanges          bool
+	CommitChangesSet       bool
 }
 
 type CleanupFlags struct {
@@ -38,6 +42,10 @@ type CleanupFlags struct {
 	DisableRules       []string
 	EditPermissionMode string
 	AutoApply          bool
+	CreateBranch       bool
+	CreateBranchSet    bool
+	CommitChanges      bool
+	CommitChangesSet   bool
 }
 
 func RunConfigure(rt *app.Runtime) error {
@@ -410,7 +418,7 @@ func RunProfile(rt *app.Runtime, flags ProfileFlags) error {
 	}
 
 	if rt.Effective.Config.Git.AutoOfferBranchAndCommit && !rt.Effective.Config.Modes.DryRun {
-		createBranch, err := offerCreateBranch(io)
+		createBranch, commitChanges, err := decideGitActions(rt.Effective.NonInteractive, flags.CreateBranchSet, flags.CreateBranch, flags.CommitChangesSet, flags.CommitChanges, io)
 		if err != nil {
 			return err
 		}
@@ -423,10 +431,6 @@ func RunProfile(rt *app.Runtime, flags ProfileFlags) error {
 				rt.AddStep("final_git_step", "failed", res.Error)
 				return nil
 			}
-		}
-		commitChanges, err := offerCommit(io)
-		if err != nil {
-			return err
 		}
 		if commitChanges {
 			res := gitflow.CommitChanges("profile")
@@ -567,7 +571,7 @@ func RunCleanup(rt *app.Runtime, flags CleanupFlags) error {
 		rt.Report.AppliedChanges = append(rt.Report.AppliedChanges, e)
 	}
 	if rt.Effective.Config.Git.AutoOfferBranchAndCommit && !rt.Effective.Config.Modes.DryRun {
-		createBranch, err := offerCreateBranch(io)
+		createBranch, commitChanges, err := decideGitActions(rt.Effective.NonInteractive, flags.CreateBranchSet, flags.CreateBranch, flags.CommitChangesSet, flags.CommitChanges, io)
 		if err != nil {
 			return err
 		}
@@ -580,10 +584,6 @@ func RunCleanup(rt *app.Runtime, flags CleanupFlags) error {
 				rt.AddStep("final_git_step", "failed", res.Error)
 				return nil
 			}
-		}
-		commitChanges, err := offerCommit(io)
-		if err != nil {
-			return err
 		}
 		if commitChanges {
 			res := gitflow.CommitChanges("cleanup")
@@ -693,6 +693,27 @@ func offerCommit(io tui.IO) (bool, error) {
 	}
 	resp = strings.ToLower(strings.TrimSpace(resp))
 	return resp == "y" || resp == "yes", nil
+}
+
+func decideGitActions(nonInteractive bool, createSet, createValue, commitSet, commitValue bool, io tui.IO) (createBranch bool, commitChanges bool, err error) {
+	if nonInteractive {
+		return createSet && createValue, commitSet && commitValue, nil
+	}
+	createBranch = createValue
+	if !createSet {
+		createBranch, err = offerCreateBranch(io)
+		if err != nil {
+			return false, false, err
+		}
+	}
+	commitChanges = commitValue
+	if !commitSet {
+		commitChanges, err = offerCommit(io)
+		if err != nil {
+			return false, false, err
+		}
+	}
+	return createBranch, commitChanges, nil
 }
 
 func upsertEnv(path, key, value string) error {

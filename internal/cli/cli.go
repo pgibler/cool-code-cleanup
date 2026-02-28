@@ -63,6 +63,8 @@ func runCommand(cmdName string, args []string) error {
 		fs.BoolVar(&profileFlags.DependencyShortCircuit, "dependency-short-circuit", true, "Enable dependency route short-circuiting enhancement")
 		fs.StringVar(&profileFlags.EditPermissionMode, "edit-permission-mode", "", "Edit permission mode (per-edit|per-file)")
 		fs.BoolVar(&profileFlags.AutoApply, "auto-apply", false, "Apply edits without per-file prompts if policy allows")
+		fs.BoolVar(&profileFlags.CreateBranch, "create-branch", false, "Create a branch at final step")
+		fs.BoolVar(&profileFlags.CommitChanges, "commit-changes", false, "Commit changes at final step")
 	}
 	if cmdName == "cleanup" {
 		fs.StringVar(&cleanupFlags.RulesPath, "rules", filepath.Join(".ccc", "rules", "cleanup.rules.json"), "Base cleanup rules file path")
@@ -77,6 +79,8 @@ func runCommand(cmdName string, args []string) error {
 		})
 		fs.StringVar(&cleanupFlags.EditPermissionMode, "edit-permission-mode", "", "Edit permission mode (per-edit|per-file)")
 		fs.BoolVar(&cleanupFlags.AutoApply, "auto-apply", false, "Apply edits without per-file prompts if policy allows")
+		fs.BoolVar(&cleanupFlags.CreateBranch, "create-branch", false, "Create a branch at final step")
+		fs.BoolVar(&cleanupFlags.CommitChanges, "commit-changes", false, "Commit changes at final step")
 	}
 
 	fs.Usage = func() {
@@ -96,6 +100,12 @@ func runCommand(cmdName string, args []string) error {
 	if cmdName == "profile" {
 		profileFlags.IncludeRoutes = parseCSV(includeCSV)
 		profileFlags.IgnoreRoutes = parseCSV(ignoreCSV)
+		detectBoolFlagSet(fs, "create-branch", &profileFlags.CreateBranchSet)
+		detectBoolFlagSet(fs, "commit-changes", &profileFlags.CommitChangesSet)
+	}
+	if cmdName == "cleanup" {
+		detectBoolFlagSet(fs, "create-branch", &cleanupFlags.CreateBranchSet)
+		detectBoolFlagSet(fs, "commit-changes", &cleanupFlags.CommitChangesSet)
 	}
 
 	effective, err := config.Resolve(cliOpts)
@@ -196,6 +206,8 @@ Profile Flags:
   --dependency-short-circuit Enable short-circuit enhancement
   --edit-permission-mode     Edit permission mode (per-edit|per-file)
   --auto-apply               Apply edits without prompts where allowed
+  --create-branch            Create a branch at final step
+  --commit-changes           Commit changes at final step
 `
 	case "cleanup":
 		extra = `
@@ -206,6 +218,8 @@ Cleanup Flags:
   --disable-rule <id>        Disable rule by id (repeatable)
   --edit-permission-mode     Edit permission mode (per-edit|per-file)
   --auto-apply               Apply edits without prompts where allowed
+  --create-branch            Create a branch at final step
+  --commit-changes           Commit changes at final step
 `
 	case "configure":
 		extra = `
