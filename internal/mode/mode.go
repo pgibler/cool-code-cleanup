@@ -410,18 +410,35 @@ func RunProfile(rt *app.Runtime, flags ProfileFlags) error {
 	}
 
 	if rt.Effective.Config.Git.AutoOfferBranchAndCommit && !rt.Effective.Config.Modes.DryRun {
-		offer, err := offerGit(io)
+		createBranch, err := offerCreateBranch(io)
 		if err != nil {
 			return err
 		}
-		if offer {
-			res := gitflow.CreateBranchAndCommit("profile")
-			rt.Report.Git = res
+		gitMeta := map[string]any{}
+		if createBranch {
+			res := gitflow.CreateBranch("profile")
+			gitMeta["create_branch"] = res
+			if res.Error != "" {
+				rt.Report.Git = gitMeta
+				rt.AddStep("final_git_step", "failed", res.Error)
+				return nil
+			}
+		}
+		commitChanges, err := offerCommit(io)
+		if err != nil {
+			return err
+		}
+		if commitChanges {
+			res := gitflow.CommitChanges("profile")
+			gitMeta["commit_changes"] = res
+			rt.Report.Git = gitMeta
 			if res.Error != "" {
 				rt.AddStep("final_git_step", "failed", res.Error)
 			} else {
 				rt.AddStep("final_git_step", "completed", fmt.Sprintf("branch=%s commit=%s", res.Branch, res.Commit))
 			}
+		} else {
+			rt.Report.Git = gitMeta
 		}
 	}
 	return nil
@@ -550,18 +567,35 @@ func RunCleanup(rt *app.Runtime, flags CleanupFlags) error {
 		rt.Report.AppliedChanges = append(rt.Report.AppliedChanges, e)
 	}
 	if rt.Effective.Config.Git.AutoOfferBranchAndCommit && !rt.Effective.Config.Modes.DryRun {
-		offer, err := offerGit(io)
+		createBranch, err := offerCreateBranch(io)
 		if err != nil {
 			return err
 		}
-		if offer {
-			res := gitflow.CreateBranchAndCommit("cleanup")
-			rt.Report.Git = res
+		gitMeta := map[string]any{}
+		if createBranch {
+			res := gitflow.CreateBranch("cleanup")
+			gitMeta["create_branch"] = res
+			if res.Error != "" {
+				rt.Report.Git = gitMeta
+				rt.AddStep("final_git_step", "failed", res.Error)
+				return nil
+			}
+		}
+		commitChanges, err := offerCommit(io)
+		if err != nil {
+			return err
+		}
+		if commitChanges {
+			res := gitflow.CommitChanges("cleanup")
+			gitMeta["commit_changes"] = res
+			rt.Report.Git = gitMeta
 			if res.Error != "" {
 				rt.AddStep("final_git_step", "failed", res.Error)
 			} else {
 				rt.AddStep("final_git_step", "completed", fmt.Sprintf("branch=%s commit=%s", res.Branch, res.Commit))
 			}
+		} else {
+			rt.Report.Git = gitMeta
 		}
 	}
 	return nil
@@ -643,8 +677,17 @@ func countApplied(edits []cleanup.Edit) int {
 	return count
 }
 
-func offerGit(io tui.IO) (bool, error) {
-	resp, err := io.Prompt("Create branch and commit changes? [y/N]: ")
+func offerCreateBranch(io tui.IO) (bool, error) {
+	resp, err := io.Prompt("Create branch? [y/N]: ")
+	if err != nil {
+		return false, err
+	}
+	resp = strings.ToLower(strings.TrimSpace(resp))
+	return resp == "y" || resp == "yes", nil
+}
+
+func offerCommit(io tui.IO) (bool, error) {
+	resp, err := io.Prompt("Commit changes? [y/N]: ")
 	if err != nil {
 		return false, err
 	}

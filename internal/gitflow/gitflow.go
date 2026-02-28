@@ -15,7 +15,7 @@ type Result struct {
 	Error   string `json:"error,omitempty"`
 }
 
-func CreateBranchAndCommit(mode string) Result {
+func CreateBranch(mode string) Result {
 	branch := fmt.Sprintf("ccc/%s-%s", mode, time.Now().UTC().Format("20060102-150405"))
 	res := Result{Offered: true, Branch: branch}
 	if err := run("git", "rev-parse", "--is-inside-work-tree"); err != nil {
@@ -25,6 +25,20 @@ func CreateBranchAndCommit(mode string) Result {
 	if err := run("git", "checkout", "-b", branch); err != nil {
 		res.Error = err.Error()
 		return res
+	}
+	res.Applied = true
+	return res
+}
+
+func CommitChanges(mode string) Result {
+	res := Result{Offered: true}
+	if err := run("git", "rev-parse", "--is-inside-work-tree"); err != nil {
+		res.Error = "not a git repository"
+		return res
+	}
+	currentBranch, err := output("git", "branch", "--show-current")
+	if err == nil {
+		res.Branch = strings.TrimSpace(currentBranch)
 	}
 	if err := run("git", "add", "-A"); err != nil {
 		res.Error = err.Error()
