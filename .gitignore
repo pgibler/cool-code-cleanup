@@ -1,0 +1,14 @@
+.ccc/reports/
+.ccc/config.json
+
+bin/
+dist/
+build/
+
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
