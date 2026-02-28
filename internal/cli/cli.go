@@ -81,6 +81,7 @@ func runCommand(cmdName string, args []string) error {
 		fs.BoolVar(&cleanupFlags.AutoApply, "auto-apply", false, "Apply edits without per-file prompts if policy allows")
 		fs.BoolVar(&cleanupFlags.CreateBranch, "create-branch", false, "Create a branch at final step")
 		fs.BoolVar(&cleanupFlags.CommitChanges, "commit-changes", false, "Commit changes at final step")
+		fs.BoolVar(&cleanupFlags.ShowProgress, "show-progress", true, "Show cleanup execution progress output")
 	}
 
 	fs.Usage = func() {
@@ -220,6 +221,7 @@ Cleanup Flags:
   --auto-apply               Apply edits without prompts where allowed
   --create-branch            Create a branch at final step
   --commit-changes           Commit changes at final step
+  --show-progress            Show cleanup execution progress output
 `
 	case "configure":
 		extra = `

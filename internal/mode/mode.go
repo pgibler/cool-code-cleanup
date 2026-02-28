@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"cool-code-cleanup/internal/ai"
@@ -46,6 +47,7 @@ type CleanupFlags struct {
 	CreateBranchSet    bool
 	CommitChanges      bool
 	CommitChangesSet   bool
+	ShowProgress       bool
 }
 
 var CleanupExecutorFactory = func(cfg config.Config) (cleanup.RuleExecutor, error) {
@@ -546,7 +548,24 @@ func RunCleanup(rt *app.Runtime, flags CleanupFlags) error {
 			dryRun = true
 		}
 	}
-	plan, applied, err := cleanup.ApplyRules(root, selectedRules, rt.Effective.Config.Modes.Safe, rt.Effective.Config.Modes.Aggressive, dryRun, executor)
+	var progress func(cleanup.ProgressEvent)
+	var spinnerStop func()
+	if flags.ShowProgress {
+		var spinner *spinnerDisplay
+		spinner = newSpinnerDisplay()
+		spinner.Start()
+		spinnerStop = spinner.Stop
+		progress = func(ev cleanup.ProgressEvent) {
+			spinner.Update(fmt.Sprintf("%s: %s | %s", ev.Phase, filepath.Base(ev.File), ev.RuleTitle))
+			if ev.Phase == "changed" {
+				fmt.Fprintf(os.Stdout, "\r\nchanged: %s | %s | %s\r\n", ev.File, ev.RuleTitle, ev.Description)
+			}
+		}
+	}
+	plan, applied, err := cleanup.ApplyRules(root, selectedRules, rt.Effective.Config.Modes.Safe, rt.Effective.Config.Modes.Aggressive, dryRun, executor, progress)
+	if spinnerStop != nil {
+		spinnerStop()
+	}
 	if err != nil {
 		return err
 	}
@@ -765,4 +784,54 @@ func ruleIDs(items []rules.Rule) []string {
 		out = append(out, r.ID)
 	}
 	return out
+}
+
+type spinnerDisplay struct {
+	mu     sync.Mutex
+	status string
+	stopCh chan struct{}
+	doneCh chan struct{}
+}
+
+func newSpinnerDisplay() *spinnerDisplay {
+	return &spinnerDisplay{
+		status: "starting cleanup",
+		stopCh: make(chan struct{}),
+		doneCh: make(chan struct{}),
+	}
+}
+
+func (s *spinnerDisplay) Start() {
+	frames := []string{"|", "/", "-", "\\"}
+	go func() {
+		i := 0
+		t := time.NewTicker(100 * time.Millisecond)
+		defer t.Stop()
+		defer close(s.doneCh)
+		for {
+			select {
+			case <-s.stopCh:
+				return
+			case <-t.C:
+				s.mu.Lock()
+				status := s.status
+				s.mu.Unlock()
+				fmt.Fprintf(os.Stdout, "\r%s %s", frames[i%len(frames)], status)
+				i++
+			}
+		}
+	}()
+}
+
+func (s *spinnerDisplay) Update(status string) {
+	s.mu.Lock()
+	s.status = status
+	s.mu.Unlock()
+}
+
+func (s *spinnerDisplay) Stop() {
+	close(s.stopCh)
+	<-s.doneCh
+	fmt.Fprint(os.Stdout, "\r")
+	fmt.Fprintln(os.Stdout, "cleanup execution complete")
 }

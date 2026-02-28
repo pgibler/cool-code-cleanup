@@ -35,6 +35,14 @@ type RuleExecutor interface {
 	TransformFile(ctx context.Context, filePath, content string, selectedRules []rules.Rule, safe, aggressive bool) (TransformResult, error)
 }
 
+type ProgressEvent struct {
+	File        string
+	RuleID      string
+	RuleTitle   string
+	Phase       string
+	Description string
+}
+
 func BuildPlan(projectRoot string, selected []rules.Rule, safe, aggressive bool) (Plan, error) {
 	cap := capabilitiesFromRules(selected)
 	var plan Plan
@@ -131,7 +139,7 @@ func ApplyPlan(plan Plan, safe, aggressive, dryRun bool) ([]Edit, error) {
 	return applied, nil
 }
 
-func ApplyRules(projectRoot string, selectedRules []rules.Rule, safe, aggressive, dryRun bool, executor RuleExecutor) (Plan, []Edit, error) {
+func ApplyRules(projectRoot string, selectedRules []rules.Rule, safe, aggressive, dryRun bool, executor RuleExecutor, onProgress func(ProgressEvent)) (Plan, []Edit, error) {
 	if executor == nil {
 		return Plan{}, nil, fmt.Errorf("cleanup rule executor is required")
 	}
@@ -157,34 +165,67 @@ func ApplyRules(projectRoot string, selectedRules []rules.Rule, safe, aggressive
 		if err != nil {
 			return err
 		}
-		orig := string(raw)
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		result, err := executor.TransformFile(ctx, path, orig, selectedRules, safe, aggressive)
-		cancel()
-		if err != nil {
-			return fmt.Errorf("cleanup transform failed for %s: %w", path, err)
+		current := string(raw)
+		for _, rule := range selectedRules {
+			if onProgress != nil {
+				onProgress(ProgressEvent{
+					File:        path,
+					RuleID:      rule.ID,
+					RuleTitle:   rule.Title,
+					Phase:       "running",
+					Description: "executing rule",
+				})
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			result, err := executor.TransformFile(ctx, path, current, []rules.Rule{rule}, safe, aggressive)
+			cancel()
+			if err != nil {
+				return fmt.Errorf("cleanup transform failed for %s with rule %s: %w", path, rule.ID, err)
+			}
+			if !result.Changed || result.Content == current {
+				if onProgress != nil {
+					onProgress(ProgressEvent{
+						File:        path,
+						RuleID:      rule.ID,
+						RuleTitle:   rule.Title,
+						Phase:       "no_change",
+						Description: "no changes",
+					})
+				}
+				continue
+			}
+			summary := strings.TrimSpace(result.Summary)
+			if summary == "" {
+				summary = "AI applied cleanup rule changes"
+			}
+			edit := Edit{
+				File:        path,
+				Description: fmt.Sprintf("[%s] %s", rule.ID, summary),
+				Before:      "AI rule execution",
+				After:       "updated content",
+				Applied:     !dryRun,
+			}
+			plan.Edits = append(plan.Edits, edit)
+			current = result.Content
+			applied = append(applied, edit)
+			if onProgress != nil {
+				onProgress(ProgressEvent{
+					File:        path,
+					RuleID:      rule.ID,
+					RuleTitle:   rule.Title,
+					Phase:       "changed",
+					Description: summary,
+				})
+			}
 		}
-		if !result.Changed || result.Content == orig {
+		if current == string(raw) {
 			return nil
 		}
-		summary := strings.TrimSpace(result.Summary)
-		if summary == "" {
-			summary = "AI applied cleanup rule changes"
-		}
-		edit := Edit{
-			File:        path,
-			Description: summary,
-			Before:      "AI rule execution",
-			After:       "updated content",
-			Applied:     !dryRun,
-		}
-		plan.Edits = append(plan.Edits, edit)
 		if !dryRun {
-			if err := os.WriteFile(path, []byte(result.Content), 0o644); err != nil {
+			if err := os.WriteFile(path, []byte(current), 0o644); err != nil {
 				return err
 			}
 		}
-		applied = append(applied, edit)
 		return nil
 	})
 	return plan, applied, err
