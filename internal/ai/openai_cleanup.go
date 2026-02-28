@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -40,7 +41,7 @@ func NewOpenAIExecutorFromConfig(cfg config.Config) (*OpenAIExecutor, error) {
 	return &OpenAIExecutor{
 		apiKey: apiKey,
 		model:  model,
-		client: &http.Client{Timeout: 90 * time.Second},
+		client: &http.Client{Timeout: 5 * time.Minute},
 	}, nil
 }
 
@@ -71,6 +72,32 @@ type cleanupProjectLLMOutput struct {
 }
 
 func (e *OpenAIExecutor) TransformProject(ctx context.Context, _ string, files []cleanup.ProjectFile, task cleanup.Task, selectedRules []rules.Rule, safe, aggressive bool) (cleanup.ProjectTransformResult, error) {
+	if len(files) == 0 {
+		return cleanup.ProjectTransformResult{Changed: false, ChangedFiles: map[string]string{}}, nil
+	}
+	batches := batchFiles(files, 180_000)
+	changedFiles := map[string]string{}
+	summaries := make([]string, 0, len(batches))
+	for _, batch := range batches {
+		res, err := e.transformBatch(ctx, batch, task, selectedRules, safe, aggressive)
+		if err != nil {
+			return cleanup.ProjectTransformResult{}, err
+		}
+		for p, c := range res.ChangedFiles {
+			changedFiles[p] = c
+		}
+		if strings.TrimSpace(res.Summary) != "" {
+			summaries = append(summaries, res.Summary)
+		}
+	}
+	return cleanup.ProjectTransformResult{
+		Changed:      len(changedFiles) > 0,
+		Summary:      strings.Join(summaries, "; "),
+		ChangedFiles: changedFiles,
+	}, nil
+}
+
+func (e *OpenAIExecutor) transformBatch(ctx context.Context, files []cleanup.ProjectFile, task cleanup.Task, selectedRules []rules.Rule, safe, aggressive bool) (cleanup.ProjectTransformResult, error) {
 	ruleJSON, _ := json.Marshal(selectedRules)
 	taskJSON, _ := json.Marshal(task)
 	filesJSON, _ := json.Marshal(files)
@@ -101,32 +128,10 @@ func (e *OpenAIExecutor) TransformProject(ctx context.Context, _ string, files [
 	if err != nil {
 		return cleanup.ProjectTransformResult{}, err
 	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.openai.com/v1/chat/completions", bytes.NewReader(body))
+	text, err := e.chatCompletionsWithRetry(ctx, body, 3)
 	if err != nil {
 		return cleanup.ProjectTransformResult{}, err
 	}
-	req.Header.Set("Authorization", "Bearer "+e.apiKey)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := e.client.Do(req)
-	if err != nil {
-		return cleanup.ProjectTransformResult{}, err
-	}
-	defer resp.Body.Close()
-
-	var parsed chatCompletionResponse
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
-		return cleanup.ProjectTransformResult{}, fmt.Errorf("decode OpenAI response: %w", err)
-	}
-	if parsed.Error != nil {
-		return cleanup.ProjectTransformResult{}, fmt.Errorf("OpenAI API error: %s", parsed.Error.Message)
-	}
-	if len(parsed.Choices) == 0 {
-		return cleanup.ProjectTransformResult{}, fmt.Errorf("OpenAI returned no choices")
-	}
-
-	text := strings.TrimSpace(parsed.Choices[0].Message.Content)
 	var out cleanupProjectLLMOutput
 	if err := json.Unmarshal([]byte(text), &out); err != nil {
 		return cleanup.ProjectTransformResult{}, fmt.Errorf("parse cleanup JSON output: %w", err)
@@ -146,4 +151,84 @@ func (e *OpenAIExecutor) TransformProject(ctx context.Context, _ string, files [
 		Summary:      strings.TrimSpace(out.Summary),
 		ChangedFiles: changedFiles,
 	}, nil
+}
+
+func (e *OpenAIExecutor) chatCompletionsWithRetry(ctx context.Context, body []byte, maxAttempts int) (string, error) {
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.openai.com/v1/chat/completions", bytes.NewReader(body))
+		if err != nil {
+			return "", err
+		}
+		req.Header.Set("Authorization", "Bearer "+e.apiKey)
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := e.client.Do(req)
+		if err != nil {
+			lastErr = err
+			if !isRetryable(err) || attempt == maxAttempts {
+				return "", err
+			}
+			time.Sleep(time.Duration(attempt) * time.Second)
+			continue
+		}
+
+		var parsed chatCompletionResponse
+		decodeErr := json.NewDecoder(resp.Body).Decode(&parsed)
+		_ = resp.Body.Close()
+		if decodeErr != nil {
+			lastErr = fmt.Errorf("decode OpenAI response: %w", decodeErr)
+			if attempt == maxAttempts {
+				return "", lastErr
+			}
+			time.Sleep(time.Duration(attempt) * time.Second)
+			continue
+		}
+		if parsed.Error != nil {
+			lastErr = fmt.Errorf("OpenAI API error: %s", parsed.Error.Message)
+			if attempt == maxAttempts {
+				return "", lastErr
+			}
+			time.Sleep(time.Duration(attempt) * time.Second)
+			continue
+		}
+		if len(parsed.Choices) == 0 {
+			lastErr = fmt.Errorf("OpenAI returned no choices")
+			if attempt == maxAttempts {
+				return "", lastErr
+			}
+			time.Sleep(time.Duration(attempt) * time.Second)
+			continue
+		}
+		return strings.TrimSpace(parsed.Choices[0].Message.Content), nil
+	}
+	return "", lastErr
+}
+
+func isRetryable(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "timeout") || strings.Contains(msg, "deadline exceeded") || strings.Contains(msg, "temporarily unavailable")
+}
+
+func batchFiles(files []cleanup.ProjectFile, maxBytes int) [][]cleanup.ProjectFile {
+	var batches [][]cleanup.ProjectFile
+	var cur []cleanup.ProjectFile
+	curSize := 0
+	for _, f := range files {
+		size := len(f.Path) + len(f.Content)
+		if len(cur) > 0 && curSize+size > maxBytes {
+			batches = append(batches, cur)
+			cur = nil
+			curSize = 0
+		}
+		cur = append(cur, f)
+		curSize += size
+	}
+	if len(cur) > 0 {
+		batches = append(batches, cur)
+	}
+	return batches
 }

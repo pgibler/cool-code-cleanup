@@ -136,7 +136,7 @@ func ExecuteTaskPlan(projectRoot string, snapshot []ProjectFile, tasks []Task, s
 			})
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		result, err := executor.TransformProject(ctx, projectRoot, taskFiles, task, selectedRules, safe, aggressive)
 		cancel()
 		if err != nil {
