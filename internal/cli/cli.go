@@ -99,8 +99,8 @@ func runCommand(cmdName string, args []string) error {
 	detectBoolFlagSet(fs, "aggressive", &cliOpts.AggressiveSet)
 	detectBoolFlagSet(fs, "dry-run", &cliOpts.DryRunSet)
 	if cmdName == "profile" {
-		profileFlags.IncludeRoutes = parseCSV(includeCSV)
-		profileFlags.IgnoreRoutes = parseCSV(ignoreCSV)
+		profileFlags.IncludeRoutes = config.ParseCSV(includeCSV)
+		profileFlags.IgnoreRoutes = config.ParseCSV(ignoreCSV)
 		detectBoolFlagSet(fs, "create-branch", &profileFlags.CreateBranchSet)
 		detectBoolFlagSet(fs, "commit-changes", &profileFlags.CommitChangesSet)
 	}
@@ -232,19 +232,4 @@ Configure Notes:
 	return fmt.Sprintf(strings.TrimSpace(base+extra+`
   --help                     Show help
 `), headline[mode], mode)
-}
-
-func parseCSV(raw string) []string {
-	if strings.TrimSpace(raw) == "" {
-		return nil
-	}
-	parts := strings.Split(raw, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
 }

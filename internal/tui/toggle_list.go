@@ -97,7 +97,7 @@ func (l *ToggleList) move(delta int) {
 		return
 	}
 	next := l.Cursor
-	for range len(l.Items) {
+	for i := 0; i < len(l.Items); i++ {
 		next += delta
 		if next < 0 {
 			next = len(l.Items) - 1

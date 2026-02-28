@@ -48,12 +48,15 @@ func Write(path string, r RunReport) error {
 	if err != nil {
 		return fmt.Errorf("create report file: %w", err)
 	}
-	defer f.Close()
 
 	enc := json.NewEncoder(f)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(r); err != nil {
+		_ = f.Close()
 		return fmt.Errorf("encode report: %w", err)
+	}
+	if cerr := f.Close(); cerr != nil {
+		return fmt.Errorf("close report file: %w", cerr)
 	}
 	return nil
 }

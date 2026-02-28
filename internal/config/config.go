@@ -284,11 +284,11 @@ func applyEnv(e *Effective) {
 		e.SourceChains["cleanup.edit_permission_mode"] = append(e.SourceChains["cleanup.edit_permission_mode"], SourceEnv)
 	}
 	if include := strings.TrimSpace(os.Getenv("CCC_PROFILE_INCLUDE_ROUTES")); include != "" {
-		e.Config.Profile.IncludeRoutes = parseCSV(include)
+		e.Config.Profile.IncludeRoutes = ParseCSV(include)
 		e.SourceChains["profile.include_routes"] = []string{SourceEnv}
 	}
 	if ignore := strings.TrimSpace(os.Getenv("CCC_PROFILE_IGNORE_ROUTES")); ignore != "" {
-		e.Config.Profile.IgnoreRoutes = parseCSV(ignore)
+		e.Config.Profile.IgnoreRoutes = ParseCSV(ignore)
 		e.SourceChains["profile.ignore_routes"] = []string{SourceEnv}
 	}
 	if shortEnv := strings.TrimSpace(os.Getenv("CCC_PROFILE_SHORT_CIRCUIT_ENV_VAR")); shortEnv != "" {
@@ -377,7 +377,8 @@ func Save(path string, cfg Config) error {
 	return nil
 }
 
-func parseCSV(raw string) []string {
+// ParseCSV parses a comma-separated string into a de-duplicated slice of trimmed values.
+func ParseCSV(raw string) []string {
 	parts := strings.Split(raw, ",")
 	var out []string
 	for _, p := range parts {

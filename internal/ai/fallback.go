@@ -5,9 +5,9 @@ import (
 	"cool-code-cleanup/internal/discovery"
 )
 
-type NoopFallback struct{}
+type NopFallback struct{}
 
-func (NoopFallback) Infer(_ []discovery.Route) (dependency.Graph, error) {
+func (NopFallback) Infer(_ []discovery.Route) (dependency.Graph, error) {
 	return dependency.Graph{
 		Dependencies: map[string][]string{},
 		Confidence:   "low",

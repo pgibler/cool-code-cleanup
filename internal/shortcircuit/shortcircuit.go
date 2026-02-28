@@ -44,7 +44,7 @@ func Apply(candidates []PatchCandidate, envVar string, dryRun bool) ([]PatchCand
 	for _, c := range candidates {
 		data, err := os.ReadFile(c.File)
 		if err != nil {
-			return out, err
+			return out, fmt.Errorf("read %s: %w", c.File, err)
 		}
 		content := string(data)
 		marker := fmt.Sprintf("CCC short-circuit marker: set %s=true to bypass external dependencies", envVar)
@@ -55,7 +55,7 @@ func Apply(candidates []PatchCandidate, envVar string, dryRun bool) ([]PatchCand
 		next := "// " + marker + "\n" + content
 		if !dryRun {
 			if err := os.WriteFile(c.File, []byte(next), 0o644); err != nil {
-				return out, err
+				return out, fmt.Errorf("write %s: %w", c.File, err)
 			}
 		}
 		c.Applied = true

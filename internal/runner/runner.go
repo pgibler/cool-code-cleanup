@@ -75,7 +75,10 @@ func WaitForHealth(baseURL string, timeout time.Duration) bool {
 		case <-ctx.Done():
 			return false
 		case <-t.C:
-			req, _ := http.NewRequest(http.MethodGet, baseURL, nil)
+			req, err := http.NewRequest(http.MethodGet, baseURL, nil)
+			if err != nil {
+				continue
+			}
 			resp, err := client.Do(req)
 			if err == nil {
 				_ = resp.Body.Close()
@@ -129,14 +132,20 @@ func Execute(baseURL string, routes []discovery.Route, plans []profile.Parameter
 			method = http.MethodGet
 		}
 		url := strings.TrimRight(baseURL, "/") + "/" + strings.TrimLeft(r.Path, "/")
-		req, _ := http.NewRequest(method, url, nil)
-		resp, err := client.Do(req)
+		req, reqErr := http.NewRequest(method, url, nil)
 		inv := Invocation{
 			RouteID:    r.ID,
 			Method:     method,
 			Path:       r.Path,
 			Parameters: valid,
 		}
+		if reqErr != nil {
+			inv.Error = reqErr.Error()
+			inv.Success = false
+			out = append(out, inv)
+			continue
+		}
+		resp, err := client.Do(req)
 		if err != nil {
 			inv.Error = err.Error()
 			inv.Success = false
