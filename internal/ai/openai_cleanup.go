@@ -47,7 +47,6 @@ func NewOpenAIExecutorFromConfig(cfg config.Config) (*OpenAIExecutor, error) {
 type chatCompletionRequest struct {
 	Model          string              `json:"model"`
 	Messages       []map[string]string `json:"messages"`
-	Temperature    float64             `json:"temperature"`
 	ResponseFormat map[string]string   `json:"response_format,omitempty"`
 }
 
@@ -90,7 +89,6 @@ func (e *OpenAIExecutor) TransformFile(ctx context.Context, filePath, content st
 			{"role": "system", "content": system},
 			{"role": "user", "content": user},
 		},
-		Temperature:    0.1,
 		ResponseFormat: map[string]string{"type": "json_object"},
 	}
 	body, err := json.Marshal(reqBody)
