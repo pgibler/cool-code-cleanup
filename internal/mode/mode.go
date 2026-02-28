@@ -48,6 +48,10 @@ type CleanupFlags struct {
 	CommitChangesSet   bool
 }
 
+var CleanupExecutorFactory = func(cfg config.Config) (cleanup.RuleExecutor, error) {
+	return ai.NewOpenAIExecutorFromConfig(cfg)
+}
+
 func RunConfigure(rt *app.Runtime) error {
 	if rt.Effective.NonInteractive {
 		return fmt.Errorf("configure requires interactive input; rerun without --non-interactive")
@@ -527,44 +531,27 @@ func RunCleanup(rt *app.Runtime, flags CleanupFlags) error {
 	rt.AddStep("cleanup_step_1", "completed", fmt.Sprintf("rules accepted (%d enabled)", len(selectedRules)))
 
 	root, _ := os.Getwd()
-	plan, err := cleanup.BuildPlan(root, selectedRules, rt.Effective.Config.Modes.Safe, rt.Effective.Config.Modes.Aggressive)
+	executor, err := CleanupExecutorFactory(rt.Effective.Config)
 	if err != nil {
 		return err
 	}
-	perm := permission.Engine{
-		Mode:           rt.Effective.Config.Cleanup.EditPermissionMode,
-		AutoApply:      rt.Effective.Config.Cleanup.AutoApply,
-		NonInteractive: rt.Effective.NonInteractive,
-	}
-	fileGroups := map[string][]cleanup.Edit{}
-	for _, e := range plan.Edits {
-		fileGroups[e.File] = append(fileGroups[e.File], e)
-	}
-	var approved cleanup.Plan
-	for file, edits := range fileGroups {
-		ok, err := perm.ApproveFile(io, file, len(edits))
+	dryRun := rt.Effective.Config.Modes.DryRun
+	if !dryRun && !rt.Effective.NonInteractive && !rt.Effective.Config.Cleanup.AutoApply {
+		resp, err := io.Prompt("Apply AI-generated cleanup changes to files? [y/N]: ")
 		if err != nil {
 			return err
 		}
-		if !ok {
-			continue
-		}
-		for _, e := range edits {
-			ok, err := perm.ApproveEdit(io, e.File, e.Description)
-			if err != nil {
-				return err
-			}
-			if ok {
-				approved.Edits = append(approved.Edits, e)
-			}
+		resp = strings.ToLower(strings.TrimSpace(resp))
+		if resp != "y" && resp != "yes" {
+			dryRun = true
 		}
 	}
-	applied, err := cleanup.ApplyPlan(approved, rt.Effective.Config.Modes.Safe, rt.Effective.Config.Modes.Aggressive, rt.Effective.Config.Modes.DryRun)
+	plan, applied, err := cleanup.ApplyRules(root, selectedRules, rt.Effective.Config.Modes.Safe, rt.Effective.Config.Modes.Aggressive, dryRun, executor)
 	if err != nil {
 		return err
 	}
-	rt.AddStep("cleanup_step_2", "completed", fmt.Sprintf("applied %d edits", countApplied(applied)))
-	for _, e := range approved.Edits {
+	rt.AddStep("cleanup_step_2", "completed", fmt.Sprintf("applied %d AI rule edits", countApplied(applied)))
+	for _, e := range plan.Edits {
 		rt.Report.CleanupPlan = append(rt.Report.CleanupPlan, e)
 	}
 	for _, e := range applied {

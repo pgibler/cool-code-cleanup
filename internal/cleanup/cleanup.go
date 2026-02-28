@@ -2,11 +2,13 @@ package cleanup
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"cool-code-cleanup/internal/rules"
 )
@@ -21,6 +23,16 @@ type Edit struct {
 
 type Plan struct {
 	Edits []Edit `json:"edits"`
+}
+
+type TransformResult struct {
+	Changed bool
+	Summary string
+	Content string
+}
+
+type RuleExecutor interface {
+	TransformFile(ctx context.Context, filePath, content string, selectedRules []rules.Rule, safe, aggressive bool) (TransformResult, error)
 }
 
 func BuildPlan(projectRoot string, selected []rules.Rule, safe, aggressive bool) (Plan, error) {
@@ -117,6 +129,65 @@ func ApplyPlan(plan Plan, safe, aggressive, dryRun bool) ([]Edit, error) {
 		applied = append(applied, edit)
 	}
 	return applied, nil
+}
+
+func ApplyRules(projectRoot string, selectedRules []rules.Rule, safe, aggressive, dryRun bool, executor RuleExecutor) (Plan, []Edit, error) {
+	if executor == nil {
+		return Plan{}, nil, fmt.Errorf("cleanup rule executor is required")
+	}
+	var plan Plan
+	var applied []Edit
+
+	err := filepath.WalkDir(projectRoot, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			name := d.Name()
+			if name == ".git" || name == ".ccc" || name == "node_modules" || name == "vendor" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		ext := strings.ToLower(filepath.Ext(path))
+		if ext != ".go" && ext != ".js" && ext != ".ts" && ext != ".py" {
+			return nil
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		orig := string(raw)
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		result, err := executor.TransformFile(ctx, path, orig, selectedRules, safe, aggressive)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("cleanup transform failed for %s: %w", path, err)
+		}
+		if !result.Changed || result.Content == orig {
+			return nil
+		}
+		summary := strings.TrimSpace(result.Summary)
+		if summary == "" {
+			summary = "AI applied cleanup rule changes"
+		}
+		edit := Edit{
+			File:        path,
+			Description: summary,
+			Before:      "AI rule execution",
+			After:       "updated content",
+			Applied:     !dryRun,
+		}
+		plan.Edits = append(plan.Edits, edit)
+		if !dryRun {
+			if err := os.WriteFile(path, []byte(result.Content), 0o644); err != nil {
+				return err
+			}
+		}
+		applied = append(applied, edit)
+		return nil
+	})
+	return plan, applied, err
 }
 
 type capabilities struct {

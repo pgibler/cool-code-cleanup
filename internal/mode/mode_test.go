@@ -1,13 +1,16 @@
 package mode
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"cool-code-cleanup/internal/app"
+	"cool-code-cleanup/internal/cleanup"
 	"cool-code-cleanup/internal/config"
+	"cool-code-cleanup/internal/rules"
 )
 
 func TestRunProfileNonInteractive(t *testing.T) {
@@ -37,6 +40,11 @@ func TestRunProfileNonInteractive(t *testing.T) {
 
 func TestRunCleanupNonInteractive(t *testing.T) {
 	dir := makeTempFixture(t, filepath.Join("..", "testdata", "node_app"))
+	prevFactory := CleanupExecutorFactory
+	CleanupExecutorFactory = func(cfg config.Config) (cleanup.RuleExecutor, error) {
+		return fakeExecutor{}, nil
+	}
+	defer func() { CleanupExecutorFactory = prevFactory }()
 	withCWD(t, dir, func() {
 		eff, err := config.Resolve(config.CLIOverrides{
 			ConfigPath:     filepath.Join(dir, ".ccc", "config.json"),
@@ -64,6 +72,18 @@ func TestRunCleanupNonInteractive(t *testing.T) {
 			}
 		}
 	})
+}
+
+type fakeExecutor struct{}
+
+func (fakeExecutor) TransformFile(_ context.Context, _ string, content string, _ []rules.Rule, _ bool, _ bool) (cleanup.TransformResult, error) {
+	next := strings.ReplaceAll(content, "  ", " ")
+	changed := next != content
+	return cleanup.TransformResult{
+		Changed: changed,
+		Summary: "fake AI cleanup transform",
+		Content: next,
+	}, nil
 }
 
 func withCWD(t *testing.T, dir string, fn func()) {
