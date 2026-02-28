@@ -50,7 +50,7 @@ type CleanupFlags struct {
 	ShowProgress       bool
 }
 
-var CleanupExecutorFactory = func(cfg config.Config) (cleanup.RuleExecutor, error) {
+var CleanupExecutorFactory = func(cfg config.Config) (cleanup.ProjectExecutor, error) {
 	return ai.NewOpenAIExecutorFromConfig(cfg)
 }
 
@@ -537,6 +537,18 @@ func RunCleanup(rt *app.Runtime, flags CleanupFlags) error {
 	if err != nil {
 		return err
 	}
+	rt.AddStep("cleanup_phase_1_indexing", "in_progress", "building project-wide snapshot")
+	snapshot, err := cleanup.BuildProjectSnapshot(root)
+	if err != nil {
+		rt.AddStep("cleanup_phase_1_indexing", "failed", err.Error())
+		return err
+	}
+	rt.AddStep("cleanup_phase_1_indexing", "completed", fmt.Sprintf("indexed %d files", len(snapshot)))
+
+	rt.AddStep("cleanup_phase_2_planning", "in_progress", "building multi-file cleanup task plan")
+	tasks := cleanup.BuildTaskPlan(snapshot, selectedRules)
+	rt.AddStep("cleanup_phase_2_planning", "completed", fmt.Sprintf("planned %d tasks", len(tasks)))
+
 	dryRun := rt.Effective.Config.Modes.DryRun
 	if !dryRun && !rt.Effective.NonInteractive && !rt.Effective.Config.Cleanup.AutoApply {
 		resp, err := io.Prompt("Apply AI-generated cleanup changes to files? [y/N]: ")
@@ -548,6 +560,7 @@ func RunCleanup(rt *app.Runtime, flags CleanupFlags) error {
 			dryRun = true
 		}
 	}
+	rt.AddStep("cleanup_phase_3_execution", "in_progress", "executing project-level cleanup tasks")
 	var progress func(cleanup.ProgressEvent)
 	var spinnerStop func()
 	if flags.ShowProgress {
@@ -558,17 +571,19 @@ func RunCleanup(rt *app.Runtime, flags CleanupFlags) error {
 		progress = func(ev cleanup.ProgressEvent) {
 			spinner.Update(fmt.Sprintf("%s: %s | %s", ev.Phase, filepath.Base(ev.File), ev.RuleTitle))
 			if ev.Phase == "changed" {
-				fmt.Fprintf(os.Stdout, "\r\nchanged: %s | %s | %s\r\n", ev.File, ev.RuleTitle, ev.Description)
+				fmt.Fprintf(os.Stdout, "\r\x1b[2Kchanged: %s | %s | %s\r\n", ev.File, ev.RuleTitle, ev.Description)
 			}
 		}
 	}
-	plan, applied, err := cleanup.ApplyRules(root, selectedRules, rt.Effective.Config.Modes.Safe, rt.Effective.Config.Modes.Aggressive, dryRun, executor, progress)
+	plan, applied, taskResults, err := cleanup.ExecuteTaskPlan(root, snapshot, tasks, selectedRules, rt.Effective.Config.Modes.Safe, rt.Effective.Config.Modes.Aggressive, dryRun, executor, progress)
 	if spinnerStop != nil {
 		spinnerStop()
 	}
 	if err != nil {
+		rt.AddStep("cleanup_phase_3_execution", "failed", err.Error())
 		return err
 	}
+	rt.AddStep("cleanup_phase_3_execution", "completed", fmt.Sprintf("executed %d tasks", len(taskResults)))
 	rt.AddStep("cleanup_step_2", "completed", fmt.Sprintf("applied %d AI rule edits", countApplied(applied)))
 	for _, e := range plan.Edits {
 		rt.Report.CleanupPlan = append(rt.Report.CleanupPlan, e)
@@ -576,6 +591,9 @@ func RunCleanup(rt *app.Runtime, flags CleanupFlags) error {
 	for _, e := range applied {
 		rt.Report.AppliedChanges = append(rt.Report.AppliedChanges, e)
 	}
+	rt.Report.CleanupPlan = append(rt.Report.CleanupPlan, map[string]any{
+		"tasks": taskResults,
+	})
 	if rt.Effective.Config.Git.AutoOfferBranchAndCommit && !rt.Effective.Config.Modes.DryRun {
 		createBranch, commitChanges, err := decideGitActions(rt.Effective.NonInteractive, flags.CreateBranchSet, flags.CreateBranch, flags.CommitChangesSet, flags.CommitChanges, io)
 		if err != nil {
@@ -816,7 +834,7 @@ func (s *spinnerDisplay) Start() {
 				s.mu.Lock()
 				status := s.status
 				s.mu.Unlock()
-				fmt.Fprintf(os.Stdout, "\r%s %s", frames[i%len(frames)], status)
+				fmt.Fprintf(os.Stdout, "\r\x1b[2K%s %s", frames[i%len(frames)], status)
 				i++
 			}
 		}
@@ -832,6 +850,6 @@ func (s *spinnerDisplay) Update(status string) {
 func (s *spinnerDisplay) Stop() {
 	close(s.stopCh)
 	<-s.doneCh
-	fmt.Fprint(os.Stdout, "\r")
+	fmt.Fprint(os.Stdout, "\r\x1b[2K")
 	fmt.Fprintln(os.Stdout, "cleanup execution complete")
 }

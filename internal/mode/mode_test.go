@@ -41,7 +41,7 @@ func TestRunProfileNonInteractive(t *testing.T) {
 func TestRunCleanupNonInteractive(t *testing.T) {
 	dir := makeTempFixture(t, filepath.Join("..", "testdata", "node_app"))
 	prevFactory := CleanupExecutorFactory
-	CleanupExecutorFactory = func(cfg config.Config) (cleanup.RuleExecutor, error) {
+	CleanupExecutorFactory = func(cfg config.Config) (cleanup.ProjectExecutor, error) {
 		return fakeExecutor{}, nil
 	}
 	defer func() { CleanupExecutorFactory = prevFactory }()
@@ -76,13 +76,18 @@ func TestRunCleanupNonInteractive(t *testing.T) {
 
 type fakeExecutor struct{}
 
-func (fakeExecutor) TransformFile(_ context.Context, _ string, content string, _ []rules.Rule, _ bool, _ bool) (cleanup.TransformResult, error) {
-	next := strings.ReplaceAll(content, "  ", " ")
-	changed := next != content
-	return cleanup.TransformResult{
-		Changed: changed,
-		Summary: "fake AI cleanup transform",
-		Content: next,
+func (fakeExecutor) TransformProject(_ context.Context, _ string, files []cleanup.ProjectFile, task cleanup.Task, _ []rules.Rule, _ bool, _ bool) (cleanup.ProjectTransformResult, error) {
+	changedFiles := map[string]string{}
+	for _, f := range files {
+		next := strings.ReplaceAll(f.Content, "  ", " ")
+		if next != f.Content {
+			changedFiles[f.Path] = next
+		}
+	}
+	return cleanup.ProjectTransformResult{
+		Changed:      len(changedFiles) > 0,
+		Summary:      "fake AI task transform: " + task.RuleID,
+		ChangedFiles: changedFiles,
 	}, nil
 }
 

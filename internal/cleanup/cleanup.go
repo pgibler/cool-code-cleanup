@@ -1,12 +1,12 @@
 package cleanup
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -25,14 +25,26 @@ type Plan struct {
 	Edits []Edit `json:"edits"`
 }
 
-type TransformResult struct {
-	Changed bool
-	Summary string
-	Content string
+type ProjectFile struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
 }
 
-type RuleExecutor interface {
-	TransformFile(ctx context.Context, filePath, content string, selectedRules []rules.Rule, safe, aggressive bool) (TransformResult, error)
+type Task struct {
+	ID          string   `json:"id"`
+	RuleID      string   `json:"rule_id"`
+	RuleTitle   string   `json:"rule_title"`
+	Description string   `json:"description"`
+	Files       []string `json:"files"`
+}
+
+type TaskResult struct {
+	TaskID       string   `json:"task_id"`
+	RuleID       string   `json:"rule_id"`
+	ChangedFiles []string `json:"changed_files"`
+	Applied      bool     `json:"applied"`
+	Summary      string   `json:"summary"`
+	Error        string   `json:"error,omitempty"`
 }
 
 type ProgressEvent struct {
@@ -43,44 +55,213 @@ type ProgressEvent struct {
 	Description string
 }
 
-func BuildPlan(projectRoot string, selected []rules.Rule, safe, aggressive bool) (Plan, error) {
-	cap := capabilitiesFromRules(selected)
+type ProjectTransformResult struct {
+	Changed      bool              `json:"changed"`
+	Summary      string            `json:"summary"`
+	ChangedFiles map[string]string `json:"changed_files"`
+}
+
+type ProjectExecutor interface {
+	TransformProject(ctx context.Context, projectRoot string, files []ProjectFile, task Task, selectedRules []rules.Rule, safe, aggressive bool) (ProjectTransformResult, error)
+}
+
+func BuildProjectSnapshot(projectRoot string) ([]ProjectFile, error) {
+	var files []ProjectFile
+	err := filepath.WalkDir(projectRoot, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case ".git", ".ccc", "node_modules", "vendor", "dist", "build", "bin":
+				return filepath.SkipDir
+			default:
+				return nil
+			}
+		}
+		ext := strings.ToLower(filepath.Ext(path))
+		if ext != ".go" && ext != ".js" && ext != ".ts" && ext != ".py" {
+			return nil
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		files = append(files, ProjectFile{Path: path, Content: string(raw)})
+		return nil
+	})
+	return files, err
+}
+
+func BuildTaskPlan(files []ProjectFile, selectedRules []rules.Rule) []Task {
+	var tasks []Task
+	for i, r := range selectedRules {
+		targets := selectTaskFiles(files, r)
+		if len(targets) == 0 {
+			continue
+		}
+		tasks = append(tasks, Task{
+			ID:          fmt.Sprintf("task-%03d-%s", i+1, sanitizeID(r.ID)),
+			RuleID:      r.ID,
+			RuleTitle:   r.Title,
+			Description: r.Description,
+			Files:       targets,
+		})
+	}
+	return tasks
+}
+
+func ExecuteTaskPlan(projectRoot string, snapshot []ProjectFile, tasks []Task, selectedRules []rules.Rule, safe, aggressive, dryRun bool, executor ProjectExecutor, onProgress func(ProgressEvent)) (Plan, []Edit, []TaskResult, error) {
+	if executor == nil {
+		return Plan{}, nil, nil, fmt.Errorf("cleanup project executor is required")
+	}
+
+	current := map[string]string{}
+	for _, f := range snapshot {
+		current[f.Path] = f.Content
+	}
+
+	var plan Plan
+	var applied []Edit
+	var results []TaskResult
+
+	for _, task := range tasks {
+		taskFiles := filesForTask(snapshot, task, current)
+		if onProgress != nil {
+			onProgress(ProgressEvent{
+				RuleID:      task.RuleID,
+				RuleTitle:   task.RuleTitle,
+				Phase:       "running",
+				Description: fmt.Sprintf("executing task %s", task.ID),
+			})
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		result, err := executor.TransformProject(ctx, projectRoot, taskFiles, task, selectedRules, safe, aggressive)
+		cancel()
+		if err != nil {
+			results = append(results, TaskResult{
+				TaskID:  task.ID,
+				RuleID:  task.RuleID,
+				Applied: false,
+				Error:   err.Error(),
+			})
+			if onProgress != nil {
+				onProgress(ProgressEvent{
+					RuleID:      task.RuleID,
+					RuleTitle:   task.RuleTitle,
+					Phase:       "error",
+					Description: err.Error(),
+				})
+			}
+			return plan, applied, results, fmt.Errorf("cleanup task %s failed: %w", task.ID, err)
+		}
+		if !result.Changed || len(result.ChangedFiles) == 0 {
+			results = append(results, TaskResult{
+				TaskID:  task.ID,
+				RuleID:  task.RuleID,
+				Applied: false,
+				Summary: "no changes",
+			})
+			if onProgress != nil {
+				onProgress(ProgressEvent{
+					RuleID:      task.RuleID,
+					RuleTitle:   task.RuleTitle,
+					Phase:       "no_change",
+					Description: "no changes",
+				})
+			}
+			continue
+		}
+
+		changedPaths := make([]string, 0, len(result.ChangedFiles))
+		for path, next := range result.ChangedFiles {
+			prev, ok := current[path]
+			if !ok || next == prev {
+				continue
+			}
+			current[path] = next
+			changedPaths = append(changedPaths, path)
+			edit := Edit{
+				File:        path,
+				Description: fmt.Sprintf("[%s] %s", task.RuleID, nonEmpty(result.Summary, "AI project cleanup change")),
+				Before:      "project-level AI task",
+				After:       "updated content",
+				Applied:     !dryRun,
+			}
+			plan.Edits = append(plan.Edits, edit)
+			applied = append(applied, edit)
+			if onProgress != nil {
+				onProgress(ProgressEvent{
+					File:        path,
+					RuleID:      task.RuleID,
+					RuleTitle:   task.RuleTitle,
+					Phase:       "changed",
+					Description: edit.Description,
+				})
+			}
+		}
+		if len(changedPaths) == 0 {
+			continue
+		}
+		results = append(results, TaskResult{
+			TaskID:       task.ID,
+			RuleID:       task.RuleID,
+			ChangedFiles: changedPaths,
+			Applied:      !dryRun,
+			Summary:      nonEmpty(result.Summary, "task applied"),
+		})
+		if !dryRun {
+			for _, path := range changedPaths {
+				if err := os.WriteFile(path, []byte(current[path]), 0o644); err != nil {
+					return plan, applied, results, err
+				}
+			}
+		}
+	}
+
+	return plan, applied, results, nil
+}
+
+// BuildPlan is a compatibility planner used by profile mode's cleanup proposal step.
+// Cleanup mode itself uses the project-wide task execution pipeline.
+func BuildPlan(projectRoot string, selectedRules []rules.Rule, safe, aggressive bool) (Plan, error) {
+	cap := capabilitiesFromRules(selectedRules)
 	var plan Plan
 	err := filepath.WalkDir(projectRoot, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if d.IsDir() {
-			name := d.Name()
-			if name == ".git" || name == ".ccc" || name == "node_modules" || name == "vendor" {
+			switch d.Name() {
+			case ".git", ".ccc", "node_modules", "vendor", "dist", "build", "bin":
 				return filepath.SkipDir
+			default:
+				return nil
 			}
-			return nil
 		}
-
 		ext := strings.ToLower(filepath.Ext(path))
 		if ext != ".go" && ext != ".js" && ext != ".ts" && ext != ".py" {
 			return nil
 		}
-		data, err := os.ReadFile(path)
+		raw, err := os.ReadFile(path)
 		if err != nil {
 			return err
 		}
-		content := string(data)
-		normalized := normalizeWhitespace(content, cap.refactorDRY || cap.simplifyComplexLogic)
-		if normalized != content {
-			plan.Edits = append(plan.Edits, Edit{
-				File:        path,
-				Description: "Normalize whitespace and collapse excessive blank lines",
-				Before:      "text formatting",
-				After:       "normalized",
-				Applied:     false,
-			})
+		content := string(raw)
+		if cap.refactorDRY || cap.simplifyComplexLogic {
+			if normalizeWhitespace(content) != content {
+				plan.Edits = append(plan.Edits, Edit{
+					File:        path,
+					Description: "Normalize whitespace and collapse excessive blank lines",
+					Before:      "text formatting",
+					After:       "normalized",
+					Applied:     false,
+				})
+			}
 		}
-
 		if cap.removeRedundantGuards && aggressive && !safe {
-			redundant := regexp.MustCompile(`(?m)^\s*if\s+(true|\(true\))\s*\{`)
-			if redundant.MatchString(content) {
+			if regexp.MustCompile(`(?m)^\s*if\s+(true|\(true\))\s*\{`).MatchString(content) {
 				plan.Edits = append(plan.Edits, Edit{
 					File:        path,
 					Description: "Remove redundant always-true guard conditions",
@@ -90,21 +271,19 @@ func BuildPlan(projectRoot string, selected []rules.Rule, safe, aggressive bool)
 				})
 			}
 		}
-
-		if cap.detectExpensiveFunctions {
-			if strings.Count(content, "for ") > 2 && strings.Count(content, "for ") != strings.Count(content, "\nfor ") {
-				plan.Edits = append(plan.Edits, Edit{
-					File:        path,
-					Description: "Potential expensive nested loops detected (analysis suggestion)",
-					Applied:     false,
-				})
-			}
+		if cap.detectExpensiveFunctions && strings.Count(content, "for ") > 2 {
+			plan.Edits = append(plan.Edits, Edit{
+				File:        path,
+				Description: "Potential expensive nested loops detected (analysis suggestion)",
+				Applied:     false,
+			})
 		}
 		return nil
 	})
 	return plan, err
 }
 
+// ApplyPlan is a compatibility applier used by profile mode's cleanup proposal step.
 func ApplyPlan(plan Plan, safe, aggressive, dryRun bool) ([]Edit, error) {
 	applied := make([]Edit, 0, len(plan.Edits))
 	for _, edit := range plan.Edits {
@@ -112,15 +291,15 @@ func ApplyPlan(plan Plan, safe, aggressive, dryRun bool) ([]Edit, error) {
 			applied = append(applied, edit)
 			continue
 		}
-		data, err := os.ReadFile(edit.File)
+		raw, err := os.ReadFile(edit.File)
 		if err != nil {
 			return applied, err
 		}
-		orig := string(data)
+		orig := string(raw)
 		next := orig
 		switch edit.Description {
 		case "Normalize whitespace and collapse excessive blank lines":
-			next = normalizeWhitespace(orig, true)
+			next = normalizeWhitespace(orig)
 		case "Remove redundant always-true guard conditions":
 			if aggressive && !safe {
 				next = regexp.MustCompile(`if\s+\(?true\)?\s*\{`).ReplaceAllString(orig, "{")
@@ -139,96 +318,42 @@ func ApplyPlan(plan Plan, safe, aggressive, dryRun bool) ([]Edit, error) {
 	return applied, nil
 }
 
-func ApplyRules(projectRoot string, selectedRules []rules.Rule, safe, aggressive, dryRun bool, executor RuleExecutor, onProgress func(ProgressEvent)) (Plan, []Edit, error) {
-	if executor == nil {
-		return Plan{}, nil, fmt.Errorf("cleanup rule executor is required")
+func selectTaskFiles(files []ProjectFile, r rules.Rule) []string {
+	text := strings.ToLower(r.ID + " " + r.Title + " " + r.Description + " " + r.Details)
+	var out []string
+	for _, f := range files {
+		c := strings.ToLower(f.Content)
+		include := false
+		switch {
+		case strings.Contains(text, "redundant guard"):
+			include = strings.Contains(c, "if true") || strings.Contains(c, "if (true)")
+		case strings.Contains(text, "dry"), strings.Contains(text, "duplicate"):
+			include = strings.Count(c, "func ") > 1 || strings.Count(c, "function ") > 1
+		case strings.Contains(text, "error handling"):
+			include = strings.Contains(c, " err") || strings.Contains(c, "catch")
+		case strings.Contains(text, "environment variable"), strings.Contains(text, "gate features"):
+			include = strings.Contains(c, "os.Getenv") || strings.Contains(c, "process.env")
+		case strings.Contains(text, "split") && strings.Contains(text, "function"):
+			include = strings.Count(c, "\n") > 80
+		case strings.Contains(text, "naming"):
+			include = true
+		case strings.Contains(text, "simplify complex"), strings.Contains(text, "reduce complexity"):
+			include = strings.Count(c, "if ") > 3 || strings.Count(c, "switch ") > 0
+		case strings.Contains(text, "expensive"), strings.Contains(text, "performance"), strings.Contains(text, "hot path"):
+			include = strings.Count(c, "for ") > 1
+		default:
+			include = true
+		}
+		if include {
+			out = append(out, f.Path)
+		}
 	}
-	var plan Plan
-	var applied []Edit
-
-	err := filepath.WalkDir(projectRoot, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
+	if len(out) == 0 {
+		for _, f := range files {
+			out = append(out, f.Path)
 		}
-		if d.IsDir() {
-			name := d.Name()
-			if name == ".git" || name == ".ccc" || name == "node_modules" || name == "vendor" {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		ext := strings.ToLower(filepath.Ext(path))
-		if ext != ".go" && ext != ".js" && ext != ".ts" && ext != ".py" {
-			return nil
-		}
-		raw, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		current := string(raw)
-		for _, rule := range selectedRules {
-			if onProgress != nil {
-				onProgress(ProgressEvent{
-					File:        path,
-					RuleID:      rule.ID,
-					RuleTitle:   rule.Title,
-					Phase:       "running",
-					Description: "executing rule",
-				})
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-			result, err := executor.TransformFile(ctx, path, current, []rules.Rule{rule}, safe, aggressive)
-			cancel()
-			if err != nil {
-				return fmt.Errorf("cleanup transform failed for %s with rule %s: %w", path, rule.ID, err)
-			}
-			if !result.Changed || result.Content == current {
-				if onProgress != nil {
-					onProgress(ProgressEvent{
-						File:        path,
-						RuleID:      rule.ID,
-						RuleTitle:   rule.Title,
-						Phase:       "no_change",
-						Description: "no changes",
-					})
-				}
-				continue
-			}
-			summary := strings.TrimSpace(result.Summary)
-			if summary == "" {
-				summary = "AI applied cleanup rule changes"
-			}
-			edit := Edit{
-				File:        path,
-				Description: fmt.Sprintf("[%s] %s", rule.ID, summary),
-				Before:      "AI rule execution",
-				After:       "updated content",
-				Applied:     !dryRun,
-			}
-			plan.Edits = append(plan.Edits, edit)
-			current = result.Content
-			applied = append(applied, edit)
-			if onProgress != nil {
-				onProgress(ProgressEvent{
-					File:        path,
-					RuleID:      rule.ID,
-					RuleTitle:   rule.Title,
-					Phase:       "changed",
-					Description: summary,
-				})
-			}
-		}
-		if current == string(raw) {
-			return nil
-		}
-		if !dryRun {
-			if err := os.WriteFile(path, []byte(current), 0o644); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-	return plan, applied, err
+	}
+	return capTaskFiles(out, 24)
 }
 
 type capabilities struct {
@@ -274,15 +399,37 @@ func capabilitiesFromRules(selected []rules.Rule) capabilities {
 	return cap
 }
 
-func normalizeWhitespace(content string, enabled bool) string {
-	if !enabled {
-		return content
+func filesForTask(snapshot []ProjectFile, task Task, current map[string]string) []ProjectFile {
+	taskSet := map[string]bool{}
+	for _, p := range task.Files {
+		taskSet[p] = true
 	}
-	sc := bufio.NewScanner(strings.NewReader(content))
+	var files []ProjectFile
+	for _, f := range snapshot {
+		if !taskSet[f.Path] {
+			continue
+		}
+		files = append(files, ProjectFile{
+			Path:    f.Path,
+			Content: current[f.Path],
+		})
+	}
+	return files
+}
+
+func capTaskFiles(files []string, max int) []string {
+	if len(files) <= max {
+		return files
+	}
+	return slices.Clone(files[:max])
+}
+
+func normalizeWhitespace(content string) string {
+	lines := strings.Split(content, "\n")
 	var out []string
 	blankCount := 0
-	for sc.Scan() {
-		line := strings.TrimRight(sc.Text(), " \t")
+	for _, line := range lines {
+		line = strings.TrimRight(line, " \t")
 		if strings.TrimSpace(line) == "" {
 			blankCount++
 			if blankCount > 1 {
@@ -293,16 +440,27 @@ func normalizeWhitespace(content string, enabled bool) string {
 		}
 		out = append(out, line)
 	}
-	return strings.Join(out, "\n") + "\n"
+	next := strings.Join(out, "\n")
+	if !strings.HasSuffix(next, "\n") {
+		next += "\n"
+	}
+	return next
 }
 
-func DescribePlan(plan Plan) []string {
-	if len(plan.Edits) == 0 {
-		return []string{"No cleanup edits detected."}
+func sanitizeID(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	s = regexp.MustCompile(`[^a-z0-9]+`).ReplaceAllString(s, "-")
+	s = strings.Trim(s, "-")
+	if s == "" {
+		return "task"
 	}
-	lines := make([]string, 0, len(plan.Edits))
-	for _, e := range plan.Edits {
-		lines = append(lines, fmt.Sprintf("%s: %s", e.File, e.Description))
+	return s
+}
+
+func nonEmpty(v, fallback string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return fallback
 	}
-	return lines
+	return v
 }

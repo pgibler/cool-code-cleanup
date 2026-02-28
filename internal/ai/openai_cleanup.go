@@ -40,7 +40,7 @@ func NewOpenAIExecutorFromConfig(cfg config.Config) (*OpenAIExecutor, error) {
 	return &OpenAIExecutor{
 		apiKey: apiKey,
 		model:  model,
-		client: &http.Client{Timeout: 45 * time.Second},
+		client: &http.Client{Timeout: 90 * time.Second},
 	}, nil
 }
 
@@ -61,14 +61,20 @@ type chatCompletionResponse struct {
 	} `json:"error,omitempty"`
 }
 
-type cleanupLLMOutput struct {
-	Changed        bool   `json:"changed"`
-	Summary        string `json:"summary"`
-	UpdatedContent string `json:"updated_content"`
+type cleanupProjectLLMOutput struct {
+	Changed bool   `json:"changed"`
+	Summary string `json:"summary"`
+	Files   []struct {
+		Path    string `json:"path"`
+		Content string `json:"content"`
+	} `json:"files"`
 }
 
-func (e *OpenAIExecutor) TransformFile(ctx context.Context, filePath, content string, selectedRules []rules.Rule, safe, aggressive bool) (cleanup.TransformResult, error) {
+func (e *OpenAIExecutor) TransformProject(ctx context.Context, _ string, files []cleanup.ProjectFile, task cleanup.Task, selectedRules []rules.Rule, safe, aggressive bool) (cleanup.ProjectTransformResult, error) {
 	ruleJSON, _ := json.Marshal(selectedRules)
+	taskJSON, _ := json.Marshal(task)
+	filesJSON, _ := json.Marshal(files)
+
 	safety := "safe=true aggressive=false"
 	if aggressive {
 		safety = "safe=true aggressive=true"
@@ -77,10 +83,10 @@ func (e *OpenAIExecutor) TransformFile(ctx context.Context, filePath, content st
 		safety = "safe=false aggressive=true"
 	}
 
-	system := "You are a code cleanup engine. Apply only the selected rules to one file. Return strict JSON with keys: changed, summary, updated_content."
+	system := "You are a code cleanup engine. Execute one cleanup task across multiple files. Return strict JSON with keys: changed, summary, files. files is an array of {path, content} for modified files only."
 	user := fmt.Sprintf(
-		"File path: %s\nSafety mode: %s\nSelected rules (json): %s\nOriginal content:\n%s\n\nReturn JSON only.",
-		filePath, safety, string(ruleJSON), content,
+		"Safety mode: %s\nTask (json): %s\nSelected rules (json): %s\nFiles in task scope (json): %s\n\nApply only task-relevant changes. Return JSON only.",
+		safety, string(taskJSON), string(ruleJSON), string(filesJSON),
 	)
 
 	reqBody := chatCompletionRequest{
@@ -93,48 +99,51 @@ func (e *OpenAIExecutor) TransformFile(ctx context.Context, filePath, content st
 	}
 	body, err := json.Marshal(reqBody)
 	if err != nil {
-		return cleanup.TransformResult{}, err
+		return cleanup.ProjectTransformResult{}, err
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.openai.com/v1/chat/completions", bytes.NewReader(body))
 	if err != nil {
-		return cleanup.TransformResult{}, err
+		return cleanup.ProjectTransformResult{}, err
 	}
 	req.Header.Set("Authorization", "Bearer "+e.apiKey)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := e.client.Do(req)
 	if err != nil {
-		return cleanup.TransformResult{}, err
+		return cleanup.ProjectTransformResult{}, err
 	}
 	defer resp.Body.Close()
 
 	var parsed chatCompletionResponse
 	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
-		return cleanup.TransformResult{}, fmt.Errorf("decode OpenAI response: %w", err)
+		return cleanup.ProjectTransformResult{}, fmt.Errorf("decode OpenAI response: %w", err)
 	}
 	if parsed.Error != nil {
-		return cleanup.TransformResult{}, fmt.Errorf("OpenAI API error: %s", parsed.Error.Message)
+		return cleanup.ProjectTransformResult{}, fmt.Errorf("OpenAI API error: %s", parsed.Error.Message)
 	}
 	if len(parsed.Choices) == 0 {
-		return cleanup.TransformResult{}, fmt.Errorf("OpenAI returned no choices")
+		return cleanup.ProjectTransformResult{}, fmt.Errorf("OpenAI returned no choices")
 	}
 
 	text := strings.TrimSpace(parsed.Choices[0].Message.Content)
-	var out cleanupLLMOutput
+	var out cleanupProjectLLMOutput
 	if err := json.Unmarshal([]byte(text), &out); err != nil {
-		return cleanup.TransformResult{}, fmt.Errorf("parse cleanup JSON output: %w", err)
+		return cleanup.ProjectTransformResult{}, fmt.Errorf("parse cleanup JSON output: %w", err)
 	}
-	result := cleanup.TransformResult{
-		Changed: out.Changed,
-		Summary: strings.TrimSpace(out.Summary),
-		Content: out.UpdatedContent,
+
+	changedFiles := map[string]string{}
+	for _, f := range out.Files {
+		p := strings.TrimSpace(f.Path)
+		if p == "" {
+			continue
+		}
+		changedFiles[p] = f.Content
 	}
-	if result.Content == "" {
-		result.Content = content
-	}
-	if !result.Changed {
-		result.Content = content
-	}
-	return result, nil
+
+	return cleanup.ProjectTransformResult{
+		Changed:      out.Changed && len(changedFiles) > 0,
+		Summary:      strings.TrimSpace(out.Summary),
+		ChangedFiles: changedFiles,
+	}, nil
 }
