@@ -8,7 +8,7 @@ import (
 	"regexp"
 	"strings"
 
-	"cool-code-cleanup/internal/config"
+	"cool-code-cleanup/internal/rules"
 )
 
 type Edit struct {
@@ -23,7 +23,8 @@ type Plan struct {
 	Edits []Edit `json:"edits"`
 }
 
-func BuildPlan(projectRoot string, opts config.CleanupConfig, safe, aggressive bool) (Plan, error) {
+func BuildPlan(projectRoot string, selected []rules.Rule, safe, aggressive bool) (Plan, error) {
+	cap := capabilitiesFromRules(selected)
 	var plan Plan
 	err := filepath.WalkDir(projectRoot, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -46,7 +47,7 @@ func BuildPlan(projectRoot string, opts config.CleanupConfig, safe, aggressive b
 			return err
 		}
 		content := string(data)
-		normalized := normalizeWhitespace(content, opts.DryRefactor || opts.SimplifyComplexLogic)
+		normalized := normalizeWhitespace(content, cap.refactorDRY || cap.simplifyComplexLogic)
 		if normalized != content {
 			plan.Edits = append(plan.Edits, Edit{
 				File:        path,
@@ -57,7 +58,7 @@ func BuildPlan(projectRoot string, opts config.CleanupConfig, safe, aggressive b
 			})
 		}
 
-		if opts.RemoveRedundantGuards && aggressive && !safe {
+		if cap.removeRedundantGuards && aggressive && !safe {
 			redundant := regexp.MustCompile(`(?m)^\s*if\s+(true|\(true\))\s*\{`)
 			if redundant.MatchString(content) {
 				plan.Edits = append(plan.Edits, Edit{
@@ -70,7 +71,7 @@ func BuildPlan(projectRoot string, opts config.CleanupConfig, safe, aggressive b
 			}
 		}
 
-		if opts.DetectExpensive {
+		if cap.detectExpensiveFunctions {
 			if strings.Count(content, "for ") > 2 && strings.Count(content, "for ") != strings.Count(content, "\nfor ") {
 				plan.Edits = append(plan.Edits, Edit{
 					File:        path,
@@ -84,7 +85,7 @@ func BuildPlan(projectRoot string, opts config.CleanupConfig, safe, aggressive b
 	return plan, err
 }
 
-func ApplyPlan(plan Plan, opts config.CleanupConfig, safe, aggressive, dryRun bool) ([]Edit, error) {
+func ApplyPlan(plan Plan, safe, aggressive, dryRun bool) ([]Edit, error) {
 	applied := make([]Edit, 0, len(plan.Edits))
 	for _, edit := range plan.Edits {
 		if strings.Contains(strings.ToLower(edit.Description), "analysis suggestion") {
@@ -116,6 +117,49 @@ func ApplyPlan(plan Plan, opts config.CleanupConfig, safe, aggressive, dryRun bo
 		applied = append(applied, edit)
 	}
 	return applied, nil
+}
+
+type capabilities struct {
+	removeRedundantGuards    bool
+	refactorDRY              bool
+	hardenErrorHandling      bool
+	gateFeaturesEnv          bool
+	splitFunctions           bool
+	standardizeNaming        bool
+	simplifyComplexLogic     bool
+	detectExpensiveFunctions bool
+}
+
+func capabilitiesFromRules(selected []rules.Rule) capabilities {
+	var cap capabilities
+	for _, r := range selected {
+		text := strings.ToLower(r.ID + " " + r.Title + " " + r.Description + " " + r.Details)
+		if strings.Contains(text, "redundant guard") {
+			cap.removeRedundantGuards = true
+		}
+		if strings.Contains(text, "dry") || strings.Contains(text, "duplicate") {
+			cap.refactorDRY = true
+		}
+		if strings.Contains(text, "error handling") {
+			cap.hardenErrorHandling = true
+		}
+		if strings.Contains(text, "environment variable") || strings.Contains(text, "env-guard") || strings.Contains(text, "gate features") {
+			cap.gateFeaturesEnv = true
+		}
+		if strings.Contains(text, "split") && strings.Contains(text, "function") {
+			cap.splitFunctions = true
+		}
+		if strings.Contains(text, "naming") {
+			cap.standardizeNaming = true
+		}
+		if strings.Contains(text, "simplify complex") || strings.Contains(text, "reduce complexity") {
+			cap.simplifyComplexLogic = true
+		}
+		if strings.Contains(text, "expensive") || strings.Contains(text, "performance") || strings.Contains(text, "hot path") {
+			cap.detectExpensiveFunctions = true
+		}
+	}
+	return cap
 }
 
 func normalizeWhitespace(content string, enabled bool) string {

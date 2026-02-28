@@ -1,5 +1,6 @@
 .ccc/reports/
 .ccc/config.json
+.ccc/rules/cleanup.local.json
 
 bin/
 dist/
@@ -11,4 +12,3 @@ build/
 *.dylib
 *.test
 *.out
-

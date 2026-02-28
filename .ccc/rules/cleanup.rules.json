@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "id": "remove_redundant_guards",
+      "enabled": true,
+      "title": "Remove redundant guards",
+      "description": "Remove redundant guard conditions that do not affect behavior.",
+      "details": "Find branches such as always-true guards or duplicate checks that can be simplified safely.",
+      "risk_level": "safe"
+    },
+    {
+      "id": "refactor_dry",
+      "enabled": true,
+      "title": "Refactor code to follow DRY principles",
+      "description": "Reduce duplicated logic by consolidating repeated patterns.",
+      "details": "Look for repeated code blocks that can be extracted into shared helpers without changing functionality.",
+      "risk_level": "safe"
+    },
+    {
+      "id": "harden_error_handling",
+      "enabled": true,
+      "title": "Harden code with better error handling",
+      "description": "Improve reliability through explicit error handling and propagation.",
+      "details": "Identify ignored errors, weak error context, and missing failure paths; strengthen handling while preserving behavior.",
+      "risk_level": "safe"
+    },
+    {
+      "id": "gate_features_env",
+      "enabled": false,
+      "title": "Gate features behind environment variables",
+      "description": "Allow behavior to be controlled by environment flags.",
+      "details": "Where appropriate, introduce env-guarded behavior for risky or optional features.",
+      "risk_level": "aggressive"
+    },
+    {
+      "id": "split_functions",
+      "enabled": false,
+      "title": "Split up functions into reusable pieces",
+      "description": "Break large functions into smaller, reusable units.",
+      "details": "Identify long or multi-responsibility functions and extract cohesive sub-functions.",
+      "risk_level": "aggressive"
+    },
+    {
+      "id": "standardize_naming",
+      "enabled": true,
+      "title": "Standardize inconsistent naming styles",
+      "description": "Normalize inconsistent variable, function, and type naming.",
+      "details": "Apply a consistent naming style within files/modules while preserving public API expectations.",
+      "risk_level": "safe"
+    },
+    {
+      "id": "simplify_complex_logic",
+      "enabled": true,
+      "title": "Simplify complex logic while retaining functionality",
+      "description": "Reduce complexity in branching and control flow.",
+      "details": "Refactor overly complex logic into clearer structures and helper functions when needed.",
+      "risk_level": "safe"
+    },
+    {
+      "id": "detect_expensive_functions",
+      "enabled": true,
+      "title": "Detect expensive functions and offer ideas to improve performance",
+      "description": "Identify expensive code paths and suggest improvements.",
+      "details": "Look for nested loops, repeated heavy operations, and hot paths; provide optimization suggestions.",
+      "risk_level": "safe"
+    }
+  ]
+}

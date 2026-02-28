@@ -17,6 +17,7 @@ import (
 	"cool-code-cleanup/internal/gitflow"
 	"cool-code-cleanup/internal/permission"
 	"cool-code-cleanup/internal/profile"
+	"cool-code-cleanup/internal/rules"
 	"cool-code-cleanup/internal/runner"
 	"cool-code-cleanup/internal/shortcircuit"
 	"cool-code-cleanup/internal/tui"
@@ -31,24 +32,12 @@ type ProfileFlags struct {
 }
 
 type CleanupFlags struct {
-	RemoveRedundantGuards bool
-	RemoveRedundantSet    bool
-	DryRefactor           bool
-	DryRefactorSet        bool
-	HardenErrorHandling   bool
-	HardenErrorSet        bool
-	GateFeaturesEnv       bool
-	GateFeaturesSet       bool
-	SplitFunctions        bool
-	SplitFunctionsSet     bool
-	StandardizeNaming     bool
-	StandardizeNamingSet  bool
-	SimplifyComplexLogic  bool
-	SimplifyLogicSet      bool
-	DetectExpensive       bool
-	DetectExpensiveSet    bool
-	EditPermissionMode    string
-	AutoApply             bool
+	RulesPath          string
+	RulesLocalPath     string
+	EnableRules        []string
+	DisableRules       []string
+	EditPermissionMode string
+	AutoApply          bool
 }
 
 func RunConfigure(rt *app.Runtime) error {
@@ -360,7 +349,14 @@ func RunProfile(rt *app.Runtime, flags ProfileFlags) error {
 	rt.AddStep("step_4_profiling", "completed", fmt.Sprintf("executed %d invocations", len(invocations)))
 
 	// Step 5: cleanup proposal
-	cplan, err := cleanup.BuildPlan(root, rt.Effective.Config.Cleanup, rt.Effective.Config.Modes.Safe, rt.Effective.Config.Modes.Aggressive)
+	defaultRules := rules.DefaultRules().Rules
+	var selectedRules []rules.Rule
+	for _, r := range defaultRules {
+		if r.Enabled {
+			selectedRules = append(selectedRules, r)
+		}
+	}
+	cplan, err := cleanup.BuildPlan(root, selectedRules, rt.Effective.Config.Modes.Safe, rt.Effective.Config.Modes.Aggressive)
 	if err != nil {
 		return err
 	}
@@ -392,7 +388,7 @@ func RunProfile(rt *app.Runtime, flags ProfileFlags) error {
 			}
 		}
 	}
-	applied, err := cleanup.ApplyPlan(approvedPlan, rt.Effective.Config.Cleanup, rt.Effective.Config.Modes.Safe, rt.Effective.Config.Modes.Aggressive, rt.Effective.Config.Modes.DryRun)
+	applied, err := cleanup.ApplyPlan(approvedPlan, rt.Effective.Config.Modes.Safe, rt.Effective.Config.Modes.Aggressive, rt.Effective.Config.Modes.DryRun)
 	if err != nil {
 		return err
 	}
@@ -433,71 +429,48 @@ func RunProfile(rt *app.Runtime, flags ProfileFlags) error {
 
 func RunCleanup(rt *app.Runtime, flags CleanupFlags) error {
 	io := tui.NewIO(os.Stdin, os.Stdout)
-	mergeCleanupFlags(&rt.Effective.Config, rt.Effective.SourceChains, flags)
+	// Cleanup mode is analysis/cleanup only. Route dependency and short-circuit flows are profile-only.
+	rt.Effective.Config.Profile.DependencyShortCircuit = false
+	rt.AddStep("cleanup_scope", "completed", "dependency and short-circuit checks are skipped in cleanup mode")
 
-	items := []tui.ToggleItem{
-		{
-			ID:                   "remove_redundant_guards",
-			Label:                "Remove redundant guards",
-			Details:              []string{"source chain: " + chain(rt.Effective.SourceChains["cleanup.remove_redundant_guards"])},
-			Enabled:              rt.Effective.Config.Cleanup.RemoveRedundantGuards,
+	if flags.EditPermissionMode == "per-edit" || flags.EditPermissionMode == "per-file" {
+		rt.Effective.Config.Cleanup.EditPermissionMode = flags.EditPermissionMode
+	}
+	rt.Effective.Config.Cleanup.AutoApply = flags.AutoApply
+
+	rulesPath := flags.RulesPath
+	if strings.TrimSpace(rulesPath) == "" {
+		rulesPath = filepath.Join(".ccc", "rules", "cleanup.rules.json")
+	}
+	localRulesPath := flags.RulesLocalPath
+	if strings.TrimSpace(localRulesPath) == "" {
+		localRulesPath = filepath.Join(".ccc", "rules", "cleanup.local.json")
+	}
+	if err := rules.EnsureBaseFile(rulesPath); err != nil {
+		return err
+	}
+	loaded, warnings, err := rules.Load(rulesPath, localRulesPath)
+	if err != nil {
+		return err
+	}
+	loaded = rules.ApplyCLIOverrides(loaded, flags.EnableRules, flags.DisableRules)
+	rt.Report.Warnings = append(rt.Report.Warnings, warnings...)
+
+	items := []tui.ToggleItem{}
+	for _, r := range loaded {
+		items = append(items, tui.ToggleItem{
+			ID:                   r.ID,
+			Label:                r.Title,
+			Details:              []string{"source chain: " + chain(r.SourceChain)},
+			Enabled:              r.Enabled,
 			ClearDetailsOnToggle: true,
-		},
-		{
-			ID:                   "dry_refactor",
-			Label:                "Refactor DRY",
-			Details:              []string{"source chain: " + chain(rt.Effective.SourceChains["cleanup.dry_refactor"])},
-			Enabled:              rt.Effective.Config.Cleanup.DryRefactor,
-			ClearDetailsOnToggle: true,
-		},
-		{
-			ID:                   "harden_error_handling",
-			Label:                "Harden error handling",
-			Details:              []string{"source chain: " + chain(rt.Effective.SourceChains["cleanup.harden_error_handling"])},
-			Enabled:              rt.Effective.Config.Cleanup.HardenErrorHandling,
-			ClearDetailsOnToggle: true,
-		},
-		{
-			ID:                   "gate_features_env",
-			Label:                "Gate features by env",
-			Details:              []string{"source chain: " + chain(rt.Effective.SourceChains["cleanup.gate_features_env"])},
-			Enabled:              rt.Effective.Config.Cleanup.GateFeaturesEnv,
-			ClearDetailsOnToggle: true,
-		},
-		{
-			ID:                   "split_functions",
-			Label:                "Split functions",
-			Details:              []string{"source chain: " + chain(rt.Effective.SourceChains["cleanup.split_functions"])},
-			Enabled:              rt.Effective.Config.Cleanup.SplitFunctions,
-			ClearDetailsOnToggle: true,
-		},
-		{
-			ID:                   "standardize_naming",
-			Label:                "Standardize naming",
-			Details:              []string{"source chain: " + chain(rt.Effective.SourceChains["cleanup.standardize_naming"])},
-			Enabled:              rt.Effective.Config.Cleanup.StandardizeNaming,
-			ClearDetailsOnToggle: true,
-		},
-		{
-			ID:                   "simplify_complex_logic",
-			Label:                "Simplify complex logic",
-			Details:              []string{"source chain: " + chain(rt.Effective.SourceChains["cleanup.simplify_complex_logic"])},
-			Enabled:              rt.Effective.Config.Cleanup.SimplifyComplexLogic,
-			ClearDetailsOnToggle: true,
-		},
-		{
-			ID:                   "detect_expensive",
-			Label:                "Detect expensive functions",
-			Details:              []string{"source chain: " + chain(rt.Effective.SourceChains["cleanup.detect_expensive_functions"])},
-			Enabled:              rt.Effective.Config.Cleanup.DetectExpensive,
-			ClearDetailsOnToggle: true,
-		},
+		})
 	}
 	list := tui.NewToggleList(items)
 	screen := tui.StepScreen{
 		Mode:        "Cleanup",
-		StepName:    "Step 1: Codebase analysis options",
-		Description: "Review and toggle cleanup options.",
+		StepName:    "Step 1: Codebase analysis rules",
+		Description: "Review and toggle cleanup rules loaded from rules files.",
 		Actions: []tui.Action{
 			{Key: "accept", Label: "Accept", Selected: true},
 			{Key: "cancel", Label: "Cancel"},
@@ -513,13 +486,27 @@ func RunCleanup(rt *app.Runtime, flags CleanupFlags) error {
 			return nil
 		}
 	}
+	selectedRules := make([]rules.Rule, 0, len(loaded))
+	enabledByID := map[string]bool{}
 	for _, item := range list.Items {
-		setCleanupToggle(&rt.Effective.Config.Cleanup, item.ID, item.Enabled)
+		enabledByID[item.ID] = item.Enabled
 	}
-	rt.AddStep("cleanup_step_1", "completed", "options accepted")
+	for _, r := range loaded {
+		r.Enabled = enabledByID[r.ID]
+		if r.Enabled {
+			selectedRules = append(selectedRules, r.Rule)
+		}
+	}
+	rt.Report.Rules = map[string]any{
+		"rules_file":        rulesPath,
+		"rules_local_file":  localRulesPath,
+		"loaded_rules":      loaded,
+		"selected_rule_ids": ruleIDs(selectedRules),
+	}
+	rt.AddStep("cleanup_step_1", "completed", fmt.Sprintf("rules accepted (%d enabled)", len(selectedRules)))
 
 	root, _ := os.Getwd()
-	plan, err := cleanup.BuildPlan(root, rt.Effective.Config.Cleanup, rt.Effective.Config.Modes.Safe, rt.Effective.Config.Modes.Aggressive)
+	plan, err := cleanup.BuildPlan(root, selectedRules, rt.Effective.Config.Modes.Safe, rt.Effective.Config.Modes.Aggressive)
 	if err != nil {
 		return err
 	}
@@ -551,7 +538,7 @@ func RunCleanup(rt *app.Runtime, flags CleanupFlags) error {
 			}
 		}
 	}
-	applied, err := cleanup.ApplyPlan(approved, rt.Effective.Config.Cleanup, rt.Effective.Config.Modes.Safe, rt.Effective.Config.Modes.Aggressive, rt.Effective.Config.Modes.DryRun)
+	applied, err := cleanup.ApplyPlan(approved, rt.Effective.Config.Modes.Safe, rt.Effective.Config.Modes.Aggressive, rt.Effective.Config.Modes.DryRun)
 	if err != nil {
 		return err
 	}
@@ -562,7 +549,6 @@ func RunCleanup(rt *app.Runtime, flags CleanupFlags) error {
 	for _, e := range applied {
 		rt.Report.AppliedChanges = append(rt.Report.AppliedChanges, e)
 	}
-
 	if rt.Effective.Config.Git.AutoOfferBranchAndCommit && !rt.Effective.Config.Modes.DryRun {
 		offer, err := offerGit(io)
 		if err != nil {
@@ -593,66 +579,6 @@ func mergeProfileFlags(cfg *config.Config, flags ProfileFlags) {
 	}
 	cfg.Profile.DependencyShortCircuit = flags.DependencyShortCircuit
 	cfg.Profile.AutoApply = flags.AutoApply
-}
-
-func mergeCleanupFlags(cfg *config.Config, chains map[string][]string, flags CleanupFlags) {
-	if flags.RemoveRedundantSet {
-		cfg.Cleanup.RemoveRedundantGuards = flags.RemoveRedundantGuards
-		chains["cleanup.remove_redundant_guards"] = append(chains["cleanup.remove_redundant_guards"], config.SourceCLI)
-	}
-	if flags.DryRefactorSet {
-		cfg.Cleanup.DryRefactor = flags.DryRefactor
-		chains["cleanup.dry_refactor"] = append(chains["cleanup.dry_refactor"], config.SourceCLI)
-	}
-	if flags.HardenErrorSet {
-		cfg.Cleanup.HardenErrorHandling = flags.HardenErrorHandling
-		chains["cleanup.harden_error_handling"] = append(chains["cleanup.harden_error_handling"], config.SourceCLI)
-	}
-	if flags.GateFeaturesSet {
-		cfg.Cleanup.GateFeaturesEnv = flags.GateFeaturesEnv
-		chains["cleanup.gate_features_env"] = append(chains["cleanup.gate_features_env"], config.SourceCLI)
-	}
-	if flags.SplitFunctionsSet {
-		cfg.Cleanup.SplitFunctions = flags.SplitFunctions
-		chains["cleanup.split_functions"] = append(chains["cleanup.split_functions"], config.SourceCLI)
-	}
-	if flags.StandardizeNamingSet {
-		cfg.Cleanup.StandardizeNaming = flags.StandardizeNaming
-		chains["cleanup.standardize_naming"] = append(chains["cleanup.standardize_naming"], config.SourceCLI)
-	}
-	if flags.SimplifyLogicSet {
-		cfg.Cleanup.SimplifyComplexLogic = flags.SimplifyComplexLogic
-		chains["cleanup.simplify_complex_logic"] = append(chains["cleanup.simplify_complex_logic"], config.SourceCLI)
-	}
-	if flags.DetectExpensiveSet {
-		cfg.Cleanup.DetectExpensive = flags.DetectExpensive
-		chains["cleanup.detect_expensive_functions"] = append(chains["cleanup.detect_expensive_functions"], config.SourceCLI)
-	}
-	if flags.EditPermissionMode == "per-edit" || flags.EditPermissionMode == "per-file" {
-		cfg.Cleanup.EditPermissionMode = flags.EditPermissionMode
-	}
-	cfg.Cleanup.AutoApply = flags.AutoApply
-}
-
-func setCleanupToggle(cfg *config.CleanupConfig, id string, enabled bool) {
-	switch id {
-	case "remove_redundant_guards":
-		cfg.RemoveRedundantGuards = enabled
-	case "dry_refactor":
-		cfg.DryRefactor = enabled
-	case "harden_error_handling":
-		cfg.HardenErrorHandling = enabled
-	case "gate_features_env":
-		cfg.GateFeaturesEnv = enabled
-	case "split_functions":
-		cfg.SplitFunctions = enabled
-	case "standardize_naming":
-		cfg.StandardizeNaming = enabled
-	case "simplify_complex_logic":
-		cfg.SimplifyComplexLogic = enabled
-	case "detect_expensive":
-		cfg.DetectExpensive = enabled
-	}
 }
 
 func filterRoutes(routes []discovery.Route, include, ignore []string) []discovery.Route {
@@ -780,4 +706,12 @@ func missingDependencies(routes []discovery.Route, deps map[string][]string) []s
 		}
 	}
 	return missing
+}
+
+func ruleIDs(items []rules.Rule) []string {
+	out := make([]string, 0, len(items))
+	for _, r := range items {
+		out = append(out, r.ID)
+	}
+	return out
 }

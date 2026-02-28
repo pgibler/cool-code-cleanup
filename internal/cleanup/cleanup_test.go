@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"cool-code-cleanup/internal/config"
+	"cool-code-cleanup/internal/rules"
 )
 
 func TestBuildPlanSafeVsAggressive(t *testing.T) {
@@ -16,14 +16,21 @@ func TestBuildPlanSafeVsAggressive(t *testing.T) {
 		t.Fatalf("write file: %v", err)
 	}
 
-	opts := config.DefaultConfig().Cleanup
-	opts.RemoveRedundantGuards = true
+	selected := []rules.Rule{
+		{
+			ID:          "remove_redundant_guards",
+			Enabled:     true,
+			Title:       "Remove redundant guards",
+			Description: "Remove redundant guard conditions.",
+			Details:     "Simplify always true guards.",
+		},
+	}
 
-	safePlan, err := BuildPlan(dir, opts, true, false)
+	safePlan, err := BuildPlan(dir, selected, true, false)
 	if err != nil {
 		t.Fatalf("safe plan: %v", err)
 	}
-	aggressivePlan, err := BuildPlan(dir, opts, false, true)
+	aggressivePlan, err := BuildPlan(dir, selected, false, true)
 	if err != nil {
 		t.Fatalf("aggressive plan: %v", err)
 	}

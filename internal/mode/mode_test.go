@@ -3,6 +3,7 @@ package mode
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"cool-code-cleanup/internal/app"
@@ -50,20 +51,17 @@ func TestRunCleanupNonInteractive(t *testing.T) {
 			t.Fatalf("resolve failed: %v", err)
 		}
 		rt := app.NewRuntime("cleanup", eff)
-		if err := RunCleanup(rt, CleanupFlags{
-			RemoveRedundantGuards: true,
-			DryRefactor:           true,
-			HardenErrorHandling:   true,
-			GateFeaturesEnv:       false,
-			SplitFunctions:        false,
-			StandardizeNaming:     true,
-			SimplifyComplexLogic:  true,
-			DetectExpensive:       true,
-		}); err != nil {
+		if err := RunCleanup(rt, CleanupFlags{}); err != nil {
 			t.Fatalf("cleanup failed: %v", err)
 		}
 		if len(rt.Report.Steps) == 0 {
 			t.Fatalf("expected steps in report")
+		}
+		for _, step := range rt.Report.Steps {
+			name := strings.ToLower(step.Name)
+			if strings.Contains(name, "step_1b_short_circuit") || strings.Contains(name, "dependency_detection") || strings.Contains(name, "dependency_confirmation") {
+				t.Fatalf("cleanup mode should not run dependency/short-circuit flow step: %s", step.Name)
+			}
 		}
 	})
 }

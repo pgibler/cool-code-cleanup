@@ -65,14 +65,16 @@ func runCommand(cmdName string, args []string) error {
 		fs.BoolVar(&profileFlags.AutoApply, "auto-apply", false, "Apply edits without per-file prompts if policy allows")
 	}
 	if cmdName == "cleanup" {
-		fs.BoolVar(&cleanupFlags.RemoveRedundantGuards, "remove-redundant-guards", true, "Remove redundant guards")
-		fs.BoolVar(&cleanupFlags.DryRefactor, "dry-refactor", true, "Refactor toward DRY principles")
-		fs.BoolVar(&cleanupFlags.HardenErrorHandling, "harden-error-handling", true, "Harden error handling")
-		fs.BoolVar(&cleanupFlags.GateFeaturesEnv, "gate-features-env", false, "Gate features behind env variables")
-		fs.BoolVar(&cleanupFlags.SplitFunctions, "split-functions", false, "Split large functions")
-		fs.BoolVar(&cleanupFlags.StandardizeNaming, "standardize-naming", true, "Standardize naming styles")
-		fs.BoolVar(&cleanupFlags.SimplifyComplexLogic, "simplify-complex-logic", true, "Simplify complex logic")
-		fs.BoolVar(&cleanupFlags.DetectExpensive, "detect-expensive-functions", true, "Detect expensive functions")
+		fs.StringVar(&cleanupFlags.RulesPath, "rules", filepath.Join(".ccc", "rules", "cleanup.rules.json"), "Base cleanup rules file path")
+		fs.StringVar(&cleanupFlags.RulesLocalPath, "rules-local", filepath.Join(".ccc", "rules", "cleanup.local.json"), "Optional local cleanup rules override path")
+		fs.Func("enable-rule", "Enable cleanup rule by id (repeatable)", func(v string) error {
+			cleanupFlags.EnableRules = append(cleanupFlags.EnableRules, strings.TrimSpace(v))
+			return nil
+		})
+		fs.Func("disable-rule", "Disable cleanup rule by id (repeatable)", func(v string) error {
+			cleanupFlags.DisableRules = append(cleanupFlags.DisableRules, strings.TrimSpace(v))
+			return nil
+		})
 		fs.StringVar(&cleanupFlags.EditPermissionMode, "edit-permission-mode", "", "Edit permission mode (per-edit|per-file)")
 		fs.BoolVar(&cleanupFlags.AutoApply, "auto-apply", false, "Apply edits without per-file prompts if policy allows")
 	}
@@ -91,16 +93,6 @@ func runCommand(cmdName string, args []string) error {
 	detectBoolFlagSet(fs, "safe", &cliOpts.SafeSet)
 	detectBoolFlagSet(fs, "aggressive", &cliOpts.AggressiveSet)
 	detectBoolFlagSet(fs, "dry-run", &cliOpts.DryRunSet)
-	if cmdName == "cleanup" {
-		detectBoolFlagSet(fs, "remove-redundant-guards", &cleanupFlags.RemoveRedundantSet)
-		detectBoolFlagSet(fs, "dry-refactor", &cleanupFlags.DryRefactorSet)
-		detectBoolFlagSet(fs, "harden-error-handling", &cleanupFlags.HardenErrorSet)
-		detectBoolFlagSet(fs, "gate-features-env", &cleanupFlags.GateFeaturesSet)
-		detectBoolFlagSet(fs, "split-functions", &cleanupFlags.SplitFunctionsSet)
-		detectBoolFlagSet(fs, "standardize-naming", &cleanupFlags.StandardizeNamingSet)
-		detectBoolFlagSet(fs, "simplify-complex-logic", &cleanupFlags.SimplifyLogicSet)
-		detectBoolFlagSet(fs, "detect-expensive-functions", &cleanupFlags.DetectExpensiveSet)
-	}
 	if cmdName == "profile" {
 		profileFlags.IncludeRoutes = parseCSV(includeCSV)
 		profileFlags.IgnoreRoutes = parseCSV(ignoreCSV)
@@ -208,14 +200,10 @@ Profile Flags:
 	case "cleanup":
 		extra = `
 Cleanup Flags:
-  --remove-redundant-guards  (cleanup) remove redundant guards
-  --dry-refactor             Refactor toward DRY principles
-  --harden-error-handling    Harden error handling
-  --gate-features-env        Gate features behind env vars
-  --split-functions          Split large functions
-  --standardize-naming       Standardize naming styles
-  --simplify-complex-logic   Simplify complex logic
-  --detect-expensive-functions Detect expensive functions
+  --rules <path>             Base cleanup rules file path
+  --rules-local <path>       Optional local cleanup rules override path
+  --enable-rule <id>         Enable rule by id (repeatable)
+  --disable-rule <id>        Disable rule by id (repeatable)
   --edit-permission-mode     Edit permission mode (per-edit|per-file)
   --auto-apply               Apply edits without prompts where allowed
 `

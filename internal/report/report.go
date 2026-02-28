@@ -26,6 +26,7 @@ type RunReport struct {
 	SourceChains    map[string][]string `json:"source_chains,omitempty"`
 	Steps           []Step              `json:"steps"`
 	Routes          any                 `json:"routes,omitempty"`
+	Rules           any                 `json:"rules,omitempty"`
 	ProfilingRuns   []any               `json:"profiling_runs,omitempty"`
 	CleanupPlan     []any               `json:"cleanup_plan,omitempty"`
 	AppliedChanges  []any               `json:"applied_changes,omitempty"`
