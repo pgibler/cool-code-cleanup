@@ -98,7 +98,7 @@ Cleanup mode does code analysis, offers solutions to clean up the code, then mod
 - Gate features behind environment variables
 - Split up functions into reusable pieces
 - Standardize inconsistent naming styles
-- Simpify complex logic while retaining functionality, potentially splitting functions up into sub-functions
+- Simplify complex logic while retaining functionality, potentially splitting functions up into sub-functions
 - Detect expensive functions and offer ideas to improve performance
 - Ask for permission to modify each file, or modify files without asking for permission
 
