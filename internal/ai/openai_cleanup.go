@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -98,16 +99,27 @@ func (e *OpenAIExecutor) TransformProject(ctx context.Context, _ string, files [
 }
 
 func (e *OpenAIExecutor) transformBatch(ctx context.Context, files []cleanup.ProjectFile, task cleanup.Task, selectedRules []rules.Rule, safe, aggressive bool) (cleanup.ProjectTransformResult, error) {
-	ruleJSON, _ := json.Marshal(selectedRules)
-	taskJSON, _ := json.Marshal(task)
-	filesJSON, _ := json.Marshal(files)
-
-	safety := "safe=true aggressive=false"
-	if aggressive {
-		safety = "safe=true aggressive=true"
+	ruleJSON, err := json.Marshal(selectedRules)
+	if err != nil {
+		return cleanup.ProjectTransformResult{}, fmt.Errorf("marshal selected rules: %w", err)
 	}
-	if !safe {
+	taskJSON, err := json.Marshal(task)
+	if err != nil {
+		return cleanup.ProjectTransformResult{}, fmt.Errorf("marshal task: %w", err)
+	}
+	filesJSON, err := json.Marshal(files)
+	if err != nil {
+		return cleanup.ProjectTransformResult{}, fmt.Errorf("marshal files: %w", err)
+	}
+
+	var safety string
+	switch {
+	case !safe:
 		safety = "safe=false aggressive=true"
+	case aggressive:
+		safety = "safe=true aggressive=true"
+	default:
+		safety = "safe=true aggressive=false"
 	}
 
 	system := "You are a code cleanup engine. Execute one cleanup task across multiple files. Return strict JSON with keys: changed, summary, files. files is an array of {path, content} for modified files only."
@@ -126,7 +138,7 @@ func (e *OpenAIExecutor) transformBatch(ctx context.Context, files []cleanup.Pro
 	}
 	body, err := json.Marshal(reqBody)
 	if err != nil {
-		return cleanup.ProjectTransformResult{}, err
+		return cleanup.ProjectTransformResult{}, fmt.Errorf("marshal OpenAI request: %w", err)
 	}
 	text, err := e.chatCompletionsWithRetry(ctx, body, 3)
 	if err != nil {
@@ -147,7 +159,7 @@ func (e *OpenAIExecutor) transformBatch(ctx context.Context, files []cleanup.Pro
 	}
 
 	return cleanup.ProjectTransformResult{
-		Changed:      out.Changed && len(changedFiles) > 0,
+		Changed:      len(changedFiles) > 0,
 		Summary:      strings.TrimSpace(out.Summary),
 		ChangedFiles: changedFiles,
 	}, nil
@@ -158,7 +170,7 @@ func (e *OpenAIExecutor) chatCompletionsWithRetry(ctx context.Context, body []by
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.openai.com/v1/chat/completions", bytes.NewReader(body))
 		if err != nil {
-			return "", err
+			return "", fmt.Errorf("build OpenAI request: %w", err)
 		}
 		req.Header.Set("Authorization", "Bearer "+e.apiKey)
 		req.Header.Set("Content-Type", "application/json")
@@ -168,6 +180,26 @@ func (e *OpenAIExecutor) chatCompletionsWithRetry(ctx context.Context, body []by
 			lastErr = err
 			if !isRetryable(err) || attempt == maxAttempts {
 				return "", err
+			}
+			time.Sleep(time.Duration(attempt) * time.Second)
+			continue
+		}
+
+		// Ensure body is always closed
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			b, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			msg := strings.TrimSpace(string(b))
+			if msg == "" {
+				msg = http.StatusText(resp.StatusCode)
+			}
+			if len(msg) > 300 {
+				msg = msg[:300] + "..."
+			}
+			lastErr = fmt.Errorf("OpenAI HTTP %d: %s", resp.StatusCode, msg)
+			// Retry on 5xx, otherwise stop
+			if attempt == maxAttempts || resp.StatusCode < 500 {
+				return "", lastErr
 			}
 			time.Sleep(time.Duration(attempt) * time.Second)
 			continue

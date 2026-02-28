@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"strings"
 	"time"
 
@@ -65,9 +64,10 @@ type ProjectExecutor interface {
 	TransformProject(ctx context.Context, projectRoot string, files []ProjectFile, task Task, selectedRules []rules.Rule, safe, aggressive bool) (ProjectTransformResult, error)
 }
 
-func BuildProjectSnapshot(projectRoot string) ([]ProjectFile, error) {
-	var files []ProjectFile
-	err := filepath.WalkDir(projectRoot, func(path string, d os.DirEntry, err error) error {
+// walkTargetFiles walks project files applying consistent directory and extension filters,
+// invoking visit for each target file.
+func walkTargetFiles(projectRoot string, visit func(path string) error) error {
+	return filepath.WalkDir(projectRoot, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -75,17 +75,23 @@ func BuildProjectSnapshot(projectRoot string) ([]ProjectFile, error) {
 			switch d.Name() {
 			case ".git", ".ccc", "node_modules", "vendor", "dist", "build", "bin":
 				return filepath.SkipDir
-			default:
-				return nil
 			}
+			return nil
 		}
 		ext := strings.ToLower(filepath.Ext(path))
 		if ext != ".go" && ext != ".js" && ext != ".ts" && ext != ".py" {
 			return nil
 		}
+		return visit(path)
+	})
+}
+
+func BuildProjectSnapshot(projectRoot string) ([]ProjectFile, error) {
+	var files []ProjectFile
+	err := walkTargetFiles(projectRoot, func(path string) error {
 		raw, err := os.ReadFile(path)
 		if err != nil {
-			return err
+			return fmt.Errorf("read %s: %w", path, err)
 		}
 		files = append(files, ProjectFile{Path: path, Content: string(raw)})
 		return nil
@@ -95,8 +101,8 @@ func BuildProjectSnapshot(projectRoot string) ([]ProjectFile, error) {
 
 func BuildTaskPlan(files []ProjectFile, selectedRules []rules.Rule) []Task {
 	var tasks []Task
+	targets := allFilePaths(files)
 	for i, r := range selectedRules {
-		targets := selectTaskFiles(files, r)
 		if len(targets) == 0 {
 			continue
 		}
@@ -156,7 +162,7 @@ func ExecuteTaskPlan(projectRoot string, snapshot []ProjectFile, tasks []Task, s
 			}
 			return plan, applied, results, fmt.Errorf("cleanup task %s failed: %w", task.ID, err)
 		}
-		if !result.Changed || len(result.ChangedFiles) == 0 {
+		if len(result.ChangedFiles) == 0 {
 			results = append(results, TaskResult{
 				TaskID:  task.ID,
 				RuleID:  task.RuleID,
@@ -214,7 +220,7 @@ func ExecuteTaskPlan(projectRoot string, snapshot []ProjectFile, tasks []Task, s
 		if !dryRun {
 			for _, path := range changedPaths {
 				if err := os.WriteFile(path, []byte(current[path]), 0o644); err != nil {
-					return plan, applied, results, err
+					return plan, applied, results, fmt.Errorf("write %s: %w", path, err)
 				}
 			}
 		}
@@ -228,25 +234,10 @@ func ExecuteTaskPlan(projectRoot string, snapshot []ProjectFile, tasks []Task, s
 func BuildPlan(projectRoot string, selectedRules []rules.Rule, safe, aggressive bool) (Plan, error) {
 	cap := capabilitiesFromRules(selectedRules)
 	var plan Plan
-	err := filepath.WalkDir(projectRoot, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			switch d.Name() {
-			case ".git", ".ccc", "node_modules", "vendor", "dist", "build", "bin":
-				return filepath.SkipDir
-			default:
-				return nil
-			}
-		}
-		ext := strings.ToLower(filepath.Ext(path))
-		if ext != ".go" && ext != ".js" && ext != ".ts" && ext != ".py" {
-			return nil
-		}
+	err := walkTargetFiles(projectRoot, func(path string) error {
 		raw, err := os.ReadFile(path)
 		if err != nil {
-			return err
+			return fmt.Errorf("read %s: %w", path, err)
 		}
 		content := string(raw)
 		if cap.refactorDRY || cap.simplifyComplexLogic {
@@ -271,12 +262,16 @@ func BuildPlan(projectRoot string, selectedRules []rules.Rule, safe, aggressive 
 				})
 			}
 		}
-		if cap.detectExpensiveFunctions && strings.Count(content, "for ") > 2 {
-			plan.Edits = append(plan.Edits, Edit{
-				File:        path,
-				Description: "Potential expensive nested loops detected (analysis suggestion)",
-				Applied:     false,
-			})
+		if cap.detectExpensiveFunctions {
+			suggestions := detectExpensiveSuggestions(content)
+			if len(suggestions) > 0 {
+				desc := "Performance analysis suggestion(s): " + strings.Join(suggestions, "; ") + " (analysis suggestion)"
+				plan.Edits = append(plan.Edits, Edit{
+					File:        path,
+					Description: desc,
+					Applied:     false,
+				})
+			}
 		}
 		return nil
 	})
@@ -293,7 +288,7 @@ func ApplyPlan(plan Plan, safe, aggressive, dryRun bool) ([]Edit, error) {
 		}
 		raw, err := os.ReadFile(edit.File)
 		if err != nil {
-			return applied, err
+			return applied, fmt.Errorf("read %s: %w", edit.File, err)
 		}
 		orig := string(raw)
 		next := orig
@@ -309,7 +304,7 @@ func ApplyPlan(plan Plan, safe, aggressive, dryRun bool) ([]Edit, error) {
 			edit.Applied = true
 			if !dryRun {
 				if err := os.WriteFile(edit.File, []byte(next), 0o644); err != nil {
-					return applied, err
+					return applied, fmt.Errorf("write %s: %w", edit.File, err)
 				}
 			}
 		}
@@ -318,42 +313,12 @@ func ApplyPlan(plan Plan, safe, aggressive, dryRun bool) ([]Edit, error) {
 	return applied, nil
 }
 
-func selectTaskFiles(files []ProjectFile, r rules.Rule) []string {
-	text := strings.ToLower(r.ID + " " + r.Title + " " + r.Description + " " + r.Details)
-	var out []string
+func allFilePaths(files []ProjectFile) []string {
+	out := make([]string, 0, len(files))
 	for _, f := range files {
-		c := strings.ToLower(f.Content)
-		include := false
-		switch {
-		case strings.Contains(text, "redundant guard"):
-			include = strings.Contains(c, "if true") || strings.Contains(c, "if (true)")
-		case strings.Contains(text, "dry"), strings.Contains(text, "duplicate"):
-			include = strings.Count(c, "func ") > 1 || strings.Count(c, "function ") > 1
-		case strings.Contains(text, "error handling"):
-			include = strings.Contains(c, " err") || strings.Contains(c, "catch")
-		case strings.Contains(text, "environment variable"), strings.Contains(text, "gate features"):
-			include = strings.Contains(c, "os.Getenv") || strings.Contains(c, "process.env")
-		case strings.Contains(text, "split") && strings.Contains(text, "function"):
-			include = strings.Count(c, "\n") > 80
-		case strings.Contains(text, "naming"):
-			include = true
-		case strings.Contains(text, "simplify complex"), strings.Contains(text, "reduce complexity"):
-			include = strings.Count(c, "if ") > 3 || strings.Count(c, "switch ") > 0
-		case strings.Contains(text, "expensive"), strings.Contains(text, "performance"), strings.Contains(text, "hot path"):
-			include = strings.Count(c, "for ") > 1
-		default:
-			include = true
-		}
-		if include {
-			out = append(out, f.Path)
-		}
+		out = append(out, f.Path)
 	}
-	if len(out) == 0 {
-		for _, f := range files {
-			out = append(out, f.Path)
-		}
-	}
-	return capTaskFiles(out, 24)
+	return out
 }
 
 type capabilities struct {
@@ -417,13 +382,6 @@ func filesForTask(snapshot []ProjectFile, task Task, current map[string]string) 
 	return files
 }
 
-func capTaskFiles(files []string, max int) []string {
-	if len(files) <= max {
-		return files
-	}
-	return slices.Clone(files[:max])
-}
-
 func normalizeWhitespace(content string) string {
 	lines := strings.Split(content, "\n")
 	var out []string
@@ -463,4 +421,95 @@ func nonEmpty(v, fallback string) string {
 		return fallback
 	}
 	return v
+}
+
+// detectExpensiveSuggestions scans file content for potentially expensive patterns
+// and returns concise, actionable suggestions. This is heuristic-only and safe
+// (no code changes are made; suggestions are informational).
+func detectExpensiveSuggestions(content string) []string {
+	lower := strings.ToLower(content)
+	loopsPresent := strings.Contains(lower, "for ") || strings.Contains(lower, "for(") || strings.Contains(lower, "while ") || strings.Contains(lower, "while(")
+
+	var out []string
+	if hasPotentialNestedLoops(content) {
+		out = append(out, "Nested or multiple loops detected; consider breaking early, using maps/sets for O(1) lookups, or precomputing indexes")
+	}
+
+	// Heavy ops anywhere (especially problematic inside loops)
+	pair := func(cond bool, msg string) {
+		if cond {
+			out = appendIfMissingStr(out, msg)
+		}
+	}
+
+	// Regex compilation
+	pair(strings.Contains(lower, "regexp.mustcompile(") || strings.Contains(lower, "regexp.compile("),
+		"Regex compilation found; compile once at init and reuse the compiled pattern (avoid compiling in hot paths)")
+
+	// I/O and network
+	ioInCode := strings.Contains(lower, "os.readfile(") || strings.Contains(lower, "ioutil.readall(") || strings.Contains(lower, "os.open(")
+	httpInCode := strings.Contains(lower, "http.get(") || strings.Contains(lower, "client.do(")
+	if loopsPresent && ioInCode {
+		out = appendIfMissingStr(out, "File I/O inside loops; cache results, stream data, or hoist I/O outside the loop where possible")
+	}
+	if loopsPresent && httpInCode {
+		out = appendIfMissingStr(out, "Network calls in loops; batch requests, reuse http.Client, and use a worker pool with rate limiting")
+	}
+
+	// JSON (de)serialization and string building
+	jsonInCode := strings.Contains(lower, "json.marshal(") || strings.Contains(lower, "json.unmarshal(")
+	if loopsPresent && jsonInCode {
+		out = appendIfMissingStr(out, "JSON (de)serialization in loops; reuse encoder/decoder and buffers, or pre-size allocations")
+	}
+	if loopsPresent && strings.Contains(content, "+=") {
+		out = appendIfMissingStr(out, "String concatenation in loops; prefer strings.Builder or bytes.Buffer to reduce allocations")
+	}
+	if loopsPresent && strings.Contains(lower, "fmt.sprintf(") {
+		out = appendIfMissingStr(out, "fmt.Sprintf in tight loops; consider pre-formatting or using bytes.Buffer/Builder")
+	}
+
+	// Allocation patterns in loops
+	if loopsPresent && strings.Contains(lower, "append(") {
+		out = appendIfMissingStr(out, "Slice growth in loops; preallocate capacity with make(..., 0, n) when size is known or can be estimated")
+	}
+
+	// Keep suggestions concise (cap to a few to avoid noise)
+	if len(out) > 6 {
+		return out[:6]
+	}
+	return out
+}
+
+func hasPotentialNestedLoops(content string) bool {
+	lines := strings.Split(content, "\n")
+	lastForIndent := -1
+	windowSinceLastFor := 0
+	for _, line := range lines {
+		trim := strings.TrimSpace(line)
+		if trim == "" {
+			windowSinceLastFor++
+			continue
+		}
+		indent := len(line) - len(strings.TrimLeft(line, " \t"))
+		isLoop := strings.HasPrefix(trim, "for ") || strings.HasPrefix(trim, "for(") || strings.HasPrefix(trim, "while ") || strings.HasPrefix(trim, "while(")
+		if isLoop {
+			if lastForIndent >= 0 && indent > lastForIndent && windowSinceLastFor < 30 {
+				return true
+			}
+			lastForIndent = indent
+			windowSinceLastFor = 0
+			continue
+		}
+		windowSinceLastFor++
+	}
+	return false
+}
+
+func appendIfMissingStr(list []string, s string) []string {
+	for _, v := range list {
+		if v == s {
+			return list
+		}
+	}
+	return append(list, s)
 }

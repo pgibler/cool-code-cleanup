@@ -175,7 +175,7 @@ func RunProfile(rt *app.Runtime, flags ProfileFlags) error {
 		return err
 	}
 	filtered := filterRoutes(routes, rt.Effective.Config.Profile.IncludeRoutes, rt.Effective.Config.Profile.IgnoreRoutes)
-	depGraph, err := dependency.Detect(filtered, ai.NoopFallback{})
+	depGraph, err := dependency.Detect(filtered, ai.NopFallback{})
 	if err != nil {
 		rt.AddStep("dependency_detection", "failed", err.Error())
 		return err
@@ -594,7 +594,7 @@ func RunCleanup(rt *app.Runtime, flags CleanupFlags) error {
 	rt.Report.CleanupPlan = append(rt.Report.CleanupPlan, map[string]any{
 		"tasks": taskResults,
 	})
-	if rt.Effective.Config.Git.AutoOfferBranchAndCommit && !rt.Effective.Config.Modes.DryRun {
+	if rt.Effective.Config.Git.AutoOfferBranchAndCommit && !dryRun {
 		createBranch, commitChanges, err := decideGitActions(rt.Effective.NonInteractive, flags.CreateBranchSet, flags.CreateBranch, flags.CommitChangesSet, flags.CommitChanges, io)
 		if err != nil {
 			return err
