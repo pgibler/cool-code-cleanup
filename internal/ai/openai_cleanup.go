@@ -23,17 +23,24 @@ type OpenAIExecutor struct {
 	client *http.Client
 }
 
+const (
+	defaultHTTPTimeout       = 6 * time.Minute
+	perBatchRequestTimeout   = 4 * time.Minute
+	initialBatchMaxBytes     = 90_000
+	maxBatchErrorSummarySize = 220
+)
+
 func NewOpenAIExecutorFromConfig(cfg config.Config) (*OpenAIExecutor, error) {
 	apiKey := strings.TrimSpace(cfg.OpenAI.APIKeyValue)
+	envName := strings.TrimSpace(cfg.OpenAI.APIKeyEnv)
+	if envName == "" {
+		envName = "OPENAI_API_KEY"
+	}
 	if apiKey == "" {
-		envName := strings.TrimSpace(cfg.OpenAI.APIKeyEnv)
-		if envName == "" {
-			envName = "OPENAI_API_KEY"
-		}
 		apiKey = strings.TrimSpace(os.Getenv(envName))
 	}
 	if apiKey == "" {
-		return nil, fmt.Errorf("missing OpenAI API key; set %s or configure openai.api_key_value", cfg.OpenAI.APIKeyEnv)
+		return nil, fmt.Errorf("missing OpenAI API key; set %s or configure openai.api_key_value", envName)
 	}
 	model := strings.TrimSpace(cfg.OpenAI.Model)
 	if model == "" {
@@ -42,7 +49,7 @@ func NewOpenAIExecutorFromConfig(cfg config.Config) (*OpenAIExecutor, error) {
 	return &OpenAIExecutor{
 		apiKey: apiKey,
 		model:  model,
-		client: &http.Client{Timeout: 5 * time.Minute},
+		client: &http.Client{Timeout: defaultHTTPTimeout},
 	}, nil
 }
 
@@ -76,13 +83,18 @@ func (e *OpenAIExecutor) TransformProject(ctx context.Context, _ string, files [
 	if len(files) == 0 {
 		return cleanup.ProjectTransformResult{Changed: false, ChangedFiles: map[string]string{}}, nil
 	}
-	batches := batchFiles(files, 180_000)
+	batches := batchFiles(files, initialBatchMaxBytes)
 	changedFiles := map[string]string{}
 	summaries := make([]string, 0, len(batches))
+	failedBatches := 0
+	var lastErr error
 	for _, batch := range batches {
-		res, err := e.transformBatch(ctx, batch, task, selectedRules, safe, aggressive)
+		res, err := e.transformBatchAdaptive(ctx, batch, task, selectedRules, safe, aggressive)
 		if err != nil {
-			return cleanup.ProjectTransformResult{}, err
+			failedBatches++
+			lastErr = err
+			summaries = append(summaries, "batch failed: "+shortError(err.Error(), maxBatchErrorSummarySize))
+			continue
 		}
 		for p, c := range res.ChangedFiles {
 			changedFiles[p] = c
@@ -91,11 +103,67 @@ func (e *OpenAIExecutor) TransformProject(ctx context.Context, _ string, files [
 			summaries = append(summaries, res.Summary)
 		}
 	}
+	if failedBatches == len(batches) {
+		if lastErr == nil {
+			lastErr = fmt.Errorf("all cleanup batches failed")
+		}
+		return cleanup.ProjectTransformResult{}, lastErr
+	}
 	return cleanup.ProjectTransformResult{
 		Changed:      len(changedFiles) > 0,
 		Summary:      strings.Join(summaries, "; "),
 		ChangedFiles: changedFiles,
 	}, nil
+}
+
+func (e *OpenAIExecutor) transformBatchAdaptive(ctx context.Context, files []cleanup.ProjectFile, task cleanup.Task, selectedRules []rules.Rule, safe, aggressive bool) (cleanup.ProjectTransformResult, error) {
+	if len(files) == 0 {
+		return cleanup.ProjectTransformResult{Changed: false, ChangedFiles: map[string]string{}}, nil
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, perBatchRequestTimeout)
+	res, err := e.transformBatch(reqCtx, files, task, selectedRules, safe, aggressive)
+	cancel()
+	if err == nil {
+		return res, nil
+	}
+	if !isRetryable(err) || len(files) == 1 {
+		return cleanup.ProjectTransformResult{}, err
+	}
+
+	mid := len(files) / 2
+	left, errLeft := e.transformBatchAdaptive(ctx, files[:mid], task, selectedRules, safe, aggressive)
+	right, errRight := e.transformBatchAdaptive(ctx, files[mid:], task, selectedRules, safe, aggressive)
+	switch {
+	case errLeft != nil && errRight != nil:
+		return cleanup.ProjectTransformResult{}, fmt.Errorf("adaptive split failed: left=%s right=%s", shortError(errLeft.Error(), 120), shortError(errRight.Error(), 120))
+	case errLeft != nil:
+		summary := strings.TrimSpace(right.Summary)
+		if summary == "" {
+			summary = "partial success"
+		}
+		right.Summary = summary + "; partial failure: " + shortError(errLeft.Error(), 120)
+		return right, nil
+	case errRight != nil:
+		summary := strings.TrimSpace(left.Summary)
+		if summary == "" {
+			summary = "partial success"
+		}
+		left.Summary = summary + "; partial failure: " + shortError(errRight.Error(), 120)
+		return left, nil
+	default:
+		merged := cleanup.ProjectTransformResult{
+			Changed:      left.Changed || right.Changed,
+			Summary:      joinNonEmpty(left.Summary, right.Summary, "; "),
+			ChangedFiles: map[string]string{},
+		}
+		for p, c := range left.ChangedFiles {
+			merged.ChangedFiles[p] = c
+		}
+		for p, c := range right.ChangedFiles {
+			merged.ChangedFiles[p] = c
+		}
+		return merged, nil
+	}
 }
 
 func (e *OpenAIExecutor) transformBatch(ctx context.Context, files []cleanup.ProjectFile, task cleanup.Task, selectedRules []rules.Rule, safe, aggressive bool) (cleanup.ProjectTransformResult, error) {
@@ -179,9 +247,9 @@ func (e *OpenAIExecutor) chatCompletionsWithRetry(ctx context.Context, body []by
 		if err != nil {
 			lastErr = err
 			if !isRetryable(err) || attempt == maxAttempts {
-				return "", err
+				return "", fmt.Errorf("openai request failed: %w", err)
 			}
-			time.Sleep(time.Duration(attempt) * time.Second)
+			time.Sleep(time.Duration(attempt*attempt) * time.Second)
 			continue
 		}
 
@@ -201,7 +269,7 @@ func (e *OpenAIExecutor) chatCompletionsWithRetry(ctx context.Context, body []by
 			if attempt == maxAttempts || resp.StatusCode < 500 {
 				return "", lastErr
 			}
-			time.Sleep(time.Duration(attempt) * time.Second)
+			time.Sleep(time.Duration(attempt*attempt) * time.Second)
 			continue
 		}
 
@@ -213,7 +281,7 @@ func (e *OpenAIExecutor) chatCompletionsWithRetry(ctx context.Context, body []by
 			if attempt == maxAttempts {
 				return "", lastErr
 			}
-			time.Sleep(time.Duration(attempt) * time.Second)
+			time.Sleep(time.Duration(attempt*attempt) * time.Second)
 			continue
 		}
 		if parsed.Error != nil {
@@ -221,7 +289,7 @@ func (e *OpenAIExecutor) chatCompletionsWithRetry(ctx context.Context, body []by
 			if attempt == maxAttempts {
 				return "", lastErr
 			}
-			time.Sleep(time.Duration(attempt) * time.Second)
+			time.Sleep(time.Duration(attempt*attempt) * time.Second)
 			continue
 		}
 		if len(parsed.Choices) == 0 {
@@ -229,7 +297,7 @@ func (e *OpenAIExecutor) chatCompletionsWithRetry(ctx context.Context, body []by
 			if attempt == maxAttempts {
 				return "", lastErr
 			}
-			time.Sleep(time.Duration(attempt) * time.Second)
+			time.Sleep(time.Duration(attempt*attempt) * time.Second)
 			continue
 		}
 		return strings.TrimSpace(parsed.Choices[0].Message.Content), nil
@@ -263,4 +331,25 @@ func batchFiles(files []cleanup.ProjectFile, maxBytes int) [][]cleanup.ProjectFi
 		batches = append(batches, cur)
 	}
 	return batches
+}
+
+func shortError(msg string, max int) string {
+	msg = strings.TrimSpace(msg)
+	if max <= 0 || len(msg) <= max {
+		return msg
+	}
+	return msg[:max] + "..."
+}
+
+func joinNonEmpty(left, right, sep string) string {
+	left = strings.TrimSpace(left)
+	right = strings.TrimSpace(right)
+	switch {
+	case left == "":
+		return right
+	case right == "":
+		return left
+	default:
+		return left + sep + right
+	}
 }

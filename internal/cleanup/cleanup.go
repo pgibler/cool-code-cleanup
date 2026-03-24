@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"time"
 
 	"cool-code-cleanup/internal/rules"
 )
@@ -142,9 +141,7 @@ func ExecuteTaskPlan(projectRoot string, snapshot []ProjectFile, tasks []Task, s
 			})
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-		result, err := executor.TransformProject(ctx, projectRoot, taskFiles, task, selectedRules, safe, aggressive)
-		cancel()
+		result, err := executor.TransformProject(context.Background(), projectRoot, taskFiles, task, selectedRules, safe, aggressive)
 		if err != nil {
 			results = append(results, TaskResult{
 				TaskID:  task.ID,
@@ -160,7 +157,7 @@ func ExecuteTaskPlan(projectRoot string, snapshot []ProjectFile, tasks []Task, s
 					Description: err.Error(),
 				})
 			}
-			return plan, applied, results, fmt.Errorf("cleanup task %s failed: %w", task.ID, err)
+			continue
 		}
 		if len(result.ChangedFiles) == 0 {
 			results = append(results, TaskResult{
@@ -223,6 +220,19 @@ func ExecuteTaskPlan(projectRoot string, snapshot []ProjectFile, tasks []Task, s
 					return plan, applied, results, fmt.Errorf("write %s: %w", path, err)
 				}
 			}
+		}
+	}
+
+	if len(tasks) > 0 && len(results) == len(tasks) {
+		allFailed := true
+		for _, r := range results {
+			if strings.TrimSpace(r.Error) == "" {
+				allFailed = false
+				break
+			}
+		}
+		if allFailed {
+			return plan, applied, results, fmt.Errorf("all cleanup tasks failed")
 		}
 	}
 

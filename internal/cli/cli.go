@@ -42,11 +42,14 @@ func runCommand(cmdName string, args []string) error {
 	fs.SetOutput(os.Stdout)
 
 	var cliOpts config.CLIOverrides
-	cliOpts.ConfigPath = filepath.Join(".ccc", "config.json")
+	cliOpts.ProjectConfigPath = config.DefaultProjectConfigPath()
+	cliOpts.GlobalConfigPath = config.DefaultGlobalConfigPath()
 	cliOpts.Safe = true
 	cliOpts.ReportPath = report.DefaultReportPath(time.Now())
 
-	fs.StringVar(&cliOpts.ConfigPath, "config", cliOpts.ConfigPath, "Path to config file")
+	fs.StringVar(&cliOpts.ProjectConfigPath, "config", cliOpts.ProjectConfigPath, "Path to project config file (alias: --project-config)")
+	fs.StringVar(&cliOpts.ProjectConfigPath, "project-config", cliOpts.ProjectConfigPath, "Path to project config file")
+	fs.StringVar(&cliOpts.GlobalConfigPath, "global-config", cliOpts.GlobalConfigPath, "Path to global config file")
 	fs.BoolVar(&cliOpts.Safe, "safe", true, "Enable safe mode")
 	fs.BoolVar(&cliOpts.Aggressive, "aggressive", false, "Enable aggressive mode for riskier refactors")
 	fs.BoolVar(&cliOpts.DryRun, "dry-run", false, "Plan changes without writing files")
@@ -61,6 +64,9 @@ func runCommand(cmdName string, args []string) error {
 		fs.StringVar(&includeCSV, "include-routes", "", "Routes to include (comma-separated paths or METHOD path)")
 		fs.StringVar(&ignoreCSV, "ignore-routes", "", "Routes to ignore (comma-separated paths or METHOD path)")
 		fs.BoolVar(&profileFlags.DependencyShortCircuit, "dependency-short-circuit", true, "Enable dependency route short-circuiting enhancement")
+		fs.BoolVar(&profileFlags.AIRouteInference, "ai-route-inference", true, "Enable AI final-pass route inference")
+		fs.BoolVar(&profileFlags.AIDependencyInference, "ai-dependency-inference", true, "Enable AI dependency inference merge pass")
+		fs.BoolVar(&profileFlags.RequireAI, "require-ai", false, "Fail if AI inference is enabled but unavailable")
 		fs.StringVar(&profileFlags.EditPermissionMode, "edit-permission-mode", "", "Edit permission mode (per-edit|per-file)")
 		fs.BoolVar(&profileFlags.AutoApply, "auto-apply", false, "Apply edits without per-file prompts if policy allows")
 		fs.BoolVar(&profileFlags.CreateBranch, "create-branch", false, "Create a branch at final step")
@@ -101,6 +107,11 @@ func runCommand(cmdName string, args []string) error {
 	if cmdName == "profile" {
 		profileFlags.IncludeRoutes = config.ParseCSV(includeCSV)
 		profileFlags.IgnoreRoutes = config.ParseCSV(ignoreCSV)
+		detectBoolFlagSet(fs, "dependency-short-circuit", &profileFlags.DependencyShortCircuitSet)
+		detectBoolFlagSet(fs, "ai-route-inference", &profileFlags.AIRouteInferenceSet)
+		detectBoolFlagSet(fs, "ai-dependency-inference", &profileFlags.AIDependencyInferenceSet)
+		detectBoolFlagSet(fs, "require-ai", &profileFlags.RequireAISet)
+		detectBoolFlagSet(fs, "auto-apply", &profileFlags.AutoApplySet)
 		detectBoolFlagSet(fs, "create-branch", &profileFlags.CreateBranchSet)
 		detectBoolFlagSet(fs, "commit-changes", &profileFlags.CommitChangesSet)
 	}
@@ -108,6 +119,7 @@ func runCommand(cmdName string, args []string) error {
 		detectBoolFlagSet(fs, "create-branch", &cleanupFlags.CreateBranchSet)
 		detectBoolFlagSet(fs, "commit-changes", &cleanupFlags.CommitChangesSet)
 	}
+	cliOpts.ConfigPath = cliOpts.ProjectConfigPath
 
 	effective, err := config.Resolve(cliOpts)
 	rt := app.NewRuntime(cmdName, effective)
@@ -167,7 +179,7 @@ Usage:
   ccc <command> [flags]
 
 Commands:
-  configure   Configure project-local settings
+  configure   Configure global OpenAI/settings defaults
   profile     Profile API routes and propose cleanup
   cleanup     Analyze code and apply cleanup options
   help        Show this help
@@ -178,7 +190,7 @@ Run "ccc <command> --help" for command options.
 
 func commandUsage(mode string) string {
 	headline := map[string]string{
-		"configure": "Configure project-local settings",
+		"configure": "Configure global OpenAI/settings defaults",
 		"profile":   "Profile API routes and propose cleanup",
 		"cleanup":   "Analyze code and apply cleanup options",
 	}
@@ -190,7 +202,9 @@ Usage:
   ccc %s [flags]
 
 Global Flags:
-  --config <path>            Path to config file (default .ccc/config.json)
+  --config <path>            Path to project config file (alias of --project-config)
+  --project-config <path>    Path to project config file (default .ccc/config.json)
+  --global-config <path>     Path to global config file (default OS config dir + /ccc/config.json)
   --safe                     Enable safe mode (default true)
   --aggressive               Enable aggressive mode (default false)
   --dry-run                  Plan changes without writing files
@@ -205,6 +219,9 @@ Profile Flags:
   --include-routes <csv>     (profile) include routes to profile
   --ignore-routes <csv>      (profile) ignore routes from profiling
   --dependency-short-circuit Enable short-circuit enhancement
+  --ai-route-inference       Enable AI final-pass route inference (default true)
+  --ai-dependency-inference  Enable AI dependency inference merge pass (default true)
+  --require-ai               Fail if AI inference is enabled but unavailable
   --edit-permission-mode     Edit permission mode (per-edit|per-file)
   --auto-apply               Apply edits without prompts where allowed
   --create-branch            Create a branch at final step
@@ -226,7 +243,7 @@ Cleanup Flags:
 	case "configure":
 		extra = `
 Configure Notes:
-  Interactive prompts will write to project-local .ccc/config.json.
+  Interactive prompts write OpenAI/default settings to global config.
 `
 	}
 	return fmt.Sprintf(strings.TrimSpace(base+extra+`

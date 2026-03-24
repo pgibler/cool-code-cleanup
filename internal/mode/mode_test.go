@@ -29,7 +29,7 @@ func TestRunProfileNonInteractive(t *testing.T) {
 			t.Fatalf("resolve failed: %v", err)
 		}
 		rt := app.NewRuntime("profile", eff)
-		if err := RunProfile(rt, ProfileFlags{DependencyShortCircuit: true}); err != nil {
+		if err := RunProfile(rt, ProfileFlags{DependencyShortCircuit: true, DependencyShortCircuitSet: true}); err != nil {
 			t.Fatalf("profile failed: %v", err)
 		}
 		if len(rt.Report.Steps) == 0 {
@@ -72,6 +72,71 @@ func TestRunCleanupNonInteractive(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestMergeProfileFlagsPreservesConfigWhenBoolFlagsUnset(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Profile.DependencyShortCircuit = false
+	cfg.Profile.AIRouteInference = false
+	cfg.Profile.AIDependencyInference = false
+	cfg.Profile.RequireAI = true
+	cfg.Profile.AutoApply = true
+
+	mergeProfileFlags(&cfg, ProfileFlags{})
+
+	if cfg.Profile.DependencyShortCircuit {
+		t.Fatalf("dependency_short_circuit changed without CLI flag")
+	}
+	if cfg.Profile.AIRouteInference {
+		t.Fatalf("ai_route_inference changed without CLI flag")
+	}
+	if cfg.Profile.AIDependencyInference {
+		t.Fatalf("ai_dependency_inference changed without CLI flag")
+	}
+	if !cfg.Profile.RequireAI {
+		t.Fatalf("require_ai changed without CLI flag")
+	}
+	if !cfg.Profile.AutoApply {
+		t.Fatalf("auto_apply changed without CLI flag")
+	}
+}
+
+func TestMergeProfileFlagsAppliesExplicitBoolOverrides(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Profile.DependencyShortCircuit = false
+	cfg.Profile.AIRouteInference = false
+	cfg.Profile.AIDependencyInference = false
+	cfg.Profile.RequireAI = false
+	cfg.Profile.AutoApply = false
+
+	mergeProfileFlags(&cfg, ProfileFlags{
+		DependencyShortCircuit:    true,
+		DependencyShortCircuitSet: true,
+		AIRouteInference:          true,
+		AIRouteInferenceSet:       true,
+		AIDependencyInference:     true,
+		AIDependencyInferenceSet:  true,
+		RequireAI:                 true,
+		RequireAISet:              true,
+		AutoApply:                 true,
+		AutoApplySet:              true,
+	})
+
+	if !cfg.Profile.DependencyShortCircuit {
+		t.Fatalf("dependency_short_circuit not overridden by explicit CLI flag")
+	}
+	if !cfg.Profile.AIRouteInference {
+		t.Fatalf("ai_route_inference not overridden by explicit CLI flag")
+	}
+	if !cfg.Profile.AIDependencyInference {
+		t.Fatalf("ai_dependency_inference not overridden by explicit CLI flag")
+	}
+	if !cfg.Profile.RequireAI {
+		t.Fatalf("require_ai not overridden by explicit CLI flag")
+	}
+	if !cfg.Profile.AutoApply {
+		t.Fatalf("auto_apply not overridden by explicit CLI flag")
+	}
 }
 
 type fakeExecutor struct{}

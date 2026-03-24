@@ -33,19 +33,34 @@ func Detect(routes []discovery.Route, fallback Fallback) (Graph, error) {
 		}
 	}
 
-	if len(g.Dependencies) > 0 || len(routes) == 0 || fallback == nil {
+	if len(routes) == 0 || fallback == nil {
 		return g, nil
 	}
 
 	fg, err := fallback.Infer(routes)
 	if err != nil {
+		return g, err
+	}
+
+	before := dependencyEdgeCount(g.Dependencies)
+	mergeDependencies(g.Dependencies, fg.Dependencies)
+	added := dependencyEdgeCount(g.Dependencies) - before
+	if added == 0 {
 		return g, nil
 	}
-	fg.Confidence = "low"
-	if fg.Rationale == "" {
-		fg.Rationale = "ai fallback inference"
+
+	rationale := strings.TrimSpace(fg.Rationale)
+	if rationale == "" {
+		rationale = "ai inference"
 	}
-	return fg, nil
+	if before > 0 {
+		g.Confidence = "medium"
+		g.Rationale = "deterministic heuristics + " + rationale
+		return g, nil
+	}
+	g.Confidence = "low"
+	g.Rationale = rationale
+	return g, nil
 }
 
 func findAuthRoutes(routes []discovery.Route) []discovery.Route {
@@ -78,4 +93,20 @@ func appendIfMissing(list []string, item string) []string {
 		return append(list, item)
 	}
 	return list
+}
+
+func mergeDependencies(base map[string][]string, overlay map[string][]string) {
+	for routeID, deps := range overlay {
+		for _, dep := range deps {
+			base[routeID] = appendIfMissing(base[routeID], dep)
+		}
+	}
+}
+
+func dependencyEdgeCount(deps map[string][]string) int {
+	n := 0
+	for _, items := range deps {
+		n += len(items)
+	}
+	return n
 }

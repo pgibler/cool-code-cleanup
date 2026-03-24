@@ -12,10 +12,11 @@ import (
 )
 
 const (
-	SourceDefault = "default"
-	SourceConfig  = "config"
-	SourceEnv     = "env"
-	SourceCLI     = "cli"
+	SourceDefault       = "default"
+	SourceGlobalConfig  = "global_config"
+	SourceProjectConfig = "project_config"
+	SourceEnv           = "env"
+	SourceCLI           = "cli"
 )
 
 type OpenAIConfig struct {
@@ -34,6 +35,9 @@ type ProfileConfig struct {
 	IncludeRoutes            []string `json:"include_routes"`
 	IgnoreRoutes             []string `json:"ignore_routes"`
 	DependencyShortCircuit   bool     `json:"dependency_short_circuit"`
+	AIRouteInference         bool     `json:"ai_route_inference"`
+	AIDependencyInference    bool     `json:"ai_dependency_inference"`
+	RequireAI                bool     `json:"require_ai"`
 	ShortCircuitEnvVar       string   `json:"short_circuit_env_var"`
 	UpdateEnvFile            bool     `json:"update_env_file"`
 	SaveShortCircuitToConfig bool     `json:"save_short_circuit_to_config"`
@@ -67,23 +71,28 @@ type Config struct {
 }
 
 type CLIOverrides struct {
-	ConfigPath     string
-	ReportPath     string
-	NonInteractive bool
-	SafeSet        bool
-	Safe           bool
-	AggressiveSet  bool
-	Aggressive     bool
-	DryRunSet      bool
-	DryRun         bool
+	// ConfigPath is a compatibility alias for ProjectConfigPath.
+	ConfigPath        string
+	ProjectConfigPath string
+	GlobalConfigPath  string
+	ReportPath        string
+	NonInteractive    bool
+	SafeSet           bool
+	Safe              bool
+	AggressiveSet     bool
+	Aggressive        bool
+	DryRunSet         bool
+	DryRun            bool
 }
 
 type Effective struct {
-	Config         Config              `json:"config"`
-	SourceChains   map[string][]string `json:"source_chains"`
-	ConfigPath     string              `json:"config_path"`
-	ReportPath     string              `json:"report_path"`
-	NonInteractive bool                `json:"non_interactive"`
+	Config            Config              `json:"config"`
+	SourceChains      map[string][]string `json:"source_chains"`
+	ConfigPath        string              `json:"config_path"`
+	ProjectConfigPath string              `json:"project_config_path"`
+	GlobalConfigPath  string              `json:"global_config_path"`
+	ReportPath        string              `json:"report_path"`
+	NonInteractive    bool                `json:"non_interactive"`
 }
 
 func DefaultConfig() Config {
@@ -99,6 +108,9 @@ func DefaultConfig() Config {
 		},
 		Profile: ProfileConfig{
 			DependencyShortCircuit:   true,
+			AIRouteInference:         true,
+			AIDependencyInference:    true,
+			RequireAI:                false,
 			ShortCircuitEnvVar:       "CoolCodeCleanupShortCircuit",
 			UpdateEnvFile:            false,
 			SaveShortCircuitToConfig: true,
@@ -124,12 +136,26 @@ func DefaultConfig() Config {
 }
 
 func Resolve(cli CLIOverrides) (Effective, error) {
+	projectConfigPath := strings.TrimSpace(cli.ProjectConfigPath)
+	if projectConfigPath == "" {
+		projectConfigPath = strings.TrimSpace(cli.ConfigPath)
+	}
+	if projectConfigPath == "" {
+		projectConfigPath = DefaultProjectConfigPath()
+	}
+	globalConfigPath := strings.TrimSpace(cli.GlobalConfigPath)
+	if globalConfigPath == "" {
+		globalConfigPath = DefaultGlobalConfigPath()
+	}
+
 	effective := Effective{
-		Config:         DefaultConfig(),
-		SourceChains:   map[string][]string{},
-		ConfigPath:     cli.ConfigPath,
-		ReportPath:     cli.ReportPath,
-		NonInteractive: cli.NonInteractive,
+		Config:            DefaultConfig(),
+		SourceChains:      map[string][]string{},
+		ConfigPath:        projectConfigPath,
+		ProjectConfigPath: projectConfigPath,
+		GlobalConfigPath:  globalConfigPath,
+		ReportPath:        cli.ReportPath,
+		NonInteractive:    cli.NonInteractive,
 	}
 
 	effective.SourceChains["modes.safe"] = []string{SourceDefault}
@@ -137,9 +163,14 @@ func Resolve(cli CLIOverrides) (Effective, error) {
 	effective.SourceChains["modes.dry_run"] = []string{SourceDefault}
 	effective.SourceChains["profile.edit_permission_mode"] = []string{SourceDefault}
 	effective.SourceChains["cleanup.edit_permission_mode"] = []string{SourceDefault}
+	effective.SourceChains["openai.api_key_env"] = []string{SourceDefault}
+	effective.SourceChains["openai.api_key_value"] = []string{SourceDefault}
 	effective.SourceChains["openai.model"] = []string{SourceDefault}
 	effective.SourceChains["profile.short_circuit_env_var"] = []string{SourceDefault}
 	effective.SourceChains["profile.dependency_short_circuit"] = []string{SourceDefault}
+	effective.SourceChains["profile.ai_route_inference"] = []string{SourceDefault}
+	effective.SourceChains["profile.ai_dependency_inference"] = []string{SourceDefault}
+	effective.SourceChains["profile.require_ai"] = []string{SourceDefault}
 	effective.SourceChains["cleanup.remove_redundant_guards"] = []string{SourceDefault}
 	effective.SourceChains["cleanup.dry_refactor"] = []string{SourceDefault}
 	effective.SourceChains["cleanup.harden_error_handling"] = []string{SourceDefault}
@@ -149,12 +180,20 @@ func Resolve(cli CLIOverrides) (Effective, error) {
 	effective.SourceChains["cleanup.simplify_complex_logic"] = []string{SourceDefault}
 	effective.SourceChains["cleanup.detect_expensive_functions"] = []string{SourceDefault}
 
-	cfgFile, exists, err := loadConfigFile(cli.ConfigPath)
+	globalFile, exists, err := loadConfigFile(globalConfigPath)
 	if err != nil {
 		return Effective{}, err
 	}
 	if exists {
-		effective.Config = mergeConfig(effective.Config, cfgFile, effective.SourceChains, SourceConfig)
+		effective.Config = mergeConfig(effective.Config, globalFile, effective.SourceChains, SourceGlobalConfig)
+	}
+
+	projectFile, exists, err := loadConfigFile(projectConfigPath)
+	if err != nil {
+		return Effective{}, err
+	}
+	if exists {
+		effective.Config = mergeConfig(effective.Config, projectFile, effective.SourceChains, SourceProjectConfig)
 	}
 
 	applyEnv(&effective)
@@ -185,6 +224,14 @@ func loadConfigFile(path string) (Config, bool, error) {
 }
 
 func mergeConfig(base Config, overlay Config, chains map[string][]string, source string) Config {
+	if overlay.OpenAI.APIKeyEnv != "" && overlay.OpenAI.APIKeyEnv != base.OpenAI.APIKeyEnv {
+		base.OpenAI.APIKeyEnv = overlay.OpenAI.APIKeyEnv
+		chains["openai.api_key_env"] = append(chains["openai.api_key_env"], source)
+	}
+	if overlay.OpenAI.APIKeyValue != "" && overlay.OpenAI.APIKeyValue != base.OpenAI.APIKeyValue {
+		base.OpenAI.APIKeyValue = overlay.OpenAI.APIKeyValue
+		chains["openai.api_key_value"] = append(chains["openai.api_key_value"], source)
+	}
 	if overlay.Modes.Safe != base.Modes.Safe {
 		base.Modes.Safe = overlay.Modes.Safe
 		chains["modes.safe"] = append(chains["modes.safe"], source)
@@ -216,6 +263,18 @@ func mergeConfig(base Config, overlay Config, chains map[string][]string, source
 	if overlay.Profile.DependencyShortCircuit != base.Profile.DependencyShortCircuit {
 		base.Profile.DependencyShortCircuit = overlay.Profile.DependencyShortCircuit
 		chains["profile.dependency_short_circuit"] = append(chains["profile.dependency_short_circuit"], source)
+	}
+	if overlay.Profile.AIRouteInference != base.Profile.AIRouteInference {
+		base.Profile.AIRouteInference = overlay.Profile.AIRouteInference
+		chains["profile.ai_route_inference"] = append(chains["profile.ai_route_inference"], source)
+	}
+	if overlay.Profile.AIDependencyInference != base.Profile.AIDependencyInference {
+		base.Profile.AIDependencyInference = overlay.Profile.AIDependencyInference
+		chains["profile.ai_dependency_inference"] = append(chains["profile.ai_dependency_inference"], source)
+	}
+	if overlay.Profile.RequireAI != base.Profile.RequireAI {
+		base.Profile.RequireAI = overlay.Profile.RequireAI
+		chains["profile.require_ai"] = append(chains["profile.require_ai"], source)
 	}
 	if overlay.Cleanup.RemoveRedundantGuards != base.Cleanup.RemoveRedundantGuards {
 		base.Cleanup.RemoveRedundantGuards = overlay.Cleanup.RemoveRedundantGuards
@@ -375,6 +434,18 @@ func Save(path string, cfg Config) error {
 		return fmt.Errorf("write config: %w", err)
 	}
 	return nil
+}
+
+func DefaultProjectConfigPath() string {
+	return filepath.Join(".ccc", "config.json")
+}
+
+func DefaultGlobalConfigPath() string {
+	homeCfg, err := os.UserConfigDir()
+	if err != nil || strings.TrimSpace(homeCfg) == "" {
+		return filepath.Join(".ccc", "config.global.json")
+	}
+	return filepath.Join(homeCfg, "ccc", "config.json")
 }
 
 // ParseCSV parses a comma-separated string into a de-duplicated slice of trimmed values.

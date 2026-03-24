@@ -25,15 +25,23 @@ import (
 )
 
 type ProfileFlags struct {
-	IncludeRoutes          []string
-	IgnoreRoutes           []string
-	DependencyShortCircuit bool
-	EditPermissionMode     string
-	AutoApply              bool
-	CreateBranch           bool
-	CreateBranchSet        bool
-	CommitChanges          bool
-	CommitChangesSet       bool
+	IncludeRoutes             []string
+	IgnoreRoutes              []string
+	DependencyShortCircuit    bool
+	DependencyShortCircuitSet bool
+	AIRouteInference          bool
+	AIRouteInferenceSet       bool
+	AIDependencyInference     bool
+	AIDependencyInferenceSet  bool
+	RequireAI                 bool
+	RequireAISet              bool
+	EditPermissionMode        string
+	AutoApply                 bool
+	AutoApplySet              bool
+	CreateBranch              bool
+	CreateBranchSet           bool
+	CommitChanges             bool
+	CommitChangesSet          bool
 }
 
 type CleanupFlags struct {
@@ -69,6 +77,13 @@ func RunConfigure(rt *app.Runtime) error {
 	if strings.TrimSpace(model) != "" {
 		cfg.OpenAI.Model = model
 	}
+	apiKey, err := io.Prompt("OpenAI API key value (optional; leave blank to use env var): ")
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(apiKey) != "" {
+		cfg.OpenAI.APIKeyValue = strings.TrimSpace(apiKey)
+	}
 	apiEnv, err := io.Prompt("API key env var name (default OPENAI_API_KEY): ")
 	if err != nil {
 		return err
@@ -85,12 +100,12 @@ func RunConfigure(rt *app.Runtime) error {
 		cfg.Cleanup.EditPermissionMode = editMode
 	}
 
-	if err := config.Save(rt.Effective.ConfigPath, cfg); err != nil {
+	if err := config.Save(rt.Effective.GlobalConfigPath, cfg); err != nil {
 		rt.AddStep("configure", "failed", err.Error())
 		return err
 	}
 	rt.Effective.Config = cfg
-	rt.AddStep("configure", "completed", "saved config")
+	rt.AddStep("configure", "completed", "saved global config")
 	return nil
 }
 
@@ -174,11 +189,75 @@ func RunProfile(rt *app.Runtime, flags ProfileFlags) error {
 		rt.AddStep("route_discovery", "failed", err.Error())
 		return err
 	}
+	aiEnabled := rt.Effective.Config.Profile.AIRouteInference || rt.Effective.Config.Profile.AIDependencyInference || rt.Effective.Config.Profile.RequireAI
+	var aiFallback *ai.OpenAIFallback
+	if aiEnabled {
+		var ferr error
+		aiFallback, ferr = ai.NewOpenAIFallbackFromConfig(rt.Effective.Config)
+		if ferr != nil {
+			reason := aiFailureReason(ferr)
+			fmt.Fprintf(os.Stdout, "AI inference setup: skipped (%s)\n", reason)
+			rt.AddStep("ai_inference_setup", "failed", reason)
+			if rt.Effective.Config.Profile.RequireAI {
+				return fmt.Errorf("AI inference required but unavailable: %w", ferr)
+			}
+		} else {
+			fmt.Fprintln(os.Stdout, "AI inference setup: enabled")
+			rt.AddStep("ai_inference_setup", "completed", "enabled")
+		}
+	} else {
+		fmt.Fprintln(os.Stdout, "AI inference setup: disabled by configuration")
+		rt.AddStep("ai_inference_setup", "completed", "disabled by configuration")
+	}
+
+	if rt.Effective.Config.Profile.AIRouteInference {
+		if aiFallback == nil {
+			fmt.Fprintln(os.Stdout, "AI route inference: skipped (AI unavailable)")
+			rt.AddStep("route_discovery_ai", "completed", "skipped (AI unavailable)")
+		} else {
+			fmt.Fprintln(os.Stdout, "AI route inference: started")
+			inferred, ierr := aiFallback.InferRoutes(root, routes)
+			if ierr != nil {
+				reason := aiFailureReason(ierr)
+				fmt.Fprintf(os.Stdout, "AI route inference: failed (%s)\n", reason)
+				rt.AddStep("route_discovery_ai", "failed", reason)
+				if rt.Effective.Config.Profile.RequireAI {
+					return fmt.Errorf("AI route inference failed: %w", ierr)
+				}
+			} else {
+				var added int
+				routes, added = mergeRoutes(routes, inferred)
+				fmt.Fprintf(os.Stdout, "AI route inference: completed (added %d routes)\n", added)
+				rt.AddStep("route_discovery_ai", "completed", fmt.Sprintf("inferred %d additional routes", added))
+			}
+		}
+	} else {
+		fmt.Fprintln(os.Stdout, "AI route inference: disabled")
+		rt.AddStep("route_discovery_ai", "completed", "disabled by configuration")
+	}
+
 	filtered := filterRoutes(routes, rt.Effective.Config.Profile.IncludeRoutes, rt.Effective.Config.Profile.IgnoreRoutes)
-	depGraph, err := dependency.Detect(filtered, ai.NopFallback{})
+	var depFallback dependency.Fallback
+	if rt.Effective.Config.Profile.AIDependencyInference {
+		if aiFallback == nil {
+			fmt.Fprintln(os.Stdout, "AI dependency inference: skipped (AI unavailable)")
+		} else {
+			fmt.Fprintln(os.Stdout, "AI dependency inference: enabled")
+			depFallback = aiFallback
+		}
+	} else {
+		fmt.Fprintln(os.Stdout, "AI dependency inference: disabled")
+	}
+	depGraph, err := dependency.Detect(filtered, depFallback)
 	if err != nil {
+		reason := aiFailureReason(err)
+		fmt.Fprintf(os.Stdout, "AI dependency inference: failed (%s)\n", reason)
+		rt.AddStep("dependency_detection_ai", "failed", reason)
+		if rt.Effective.Config.Profile.RequireAI && rt.Effective.Config.Profile.AIDependencyInference {
+			return fmt.Errorf("AI dependency inference failed: %w", err)
+		}
 		rt.AddStep("dependency_detection", "failed", err.Error())
-		return err
+		depGraph, _ = dependency.Detect(filtered, nil)
 	}
 	rt.AddStep("route_discovery", "completed", fmt.Sprintf("discovered %d routes", len(filtered)))
 	rt.AddStep("dependency_detection", "completed", depGraph.Rationale)
@@ -635,8 +714,21 @@ func mergeProfileFlags(cfg *config.Config, flags ProfileFlags) {
 	if flags.EditPermissionMode == "per-edit" || flags.EditPermissionMode == "per-file" {
 		cfg.Profile.EditPermissionMode = flags.EditPermissionMode
 	}
-	cfg.Profile.DependencyShortCircuit = flags.DependencyShortCircuit
-	cfg.Profile.AutoApply = flags.AutoApply
+	if flags.DependencyShortCircuitSet {
+		cfg.Profile.DependencyShortCircuit = flags.DependencyShortCircuit
+	}
+	if flags.AIRouteInferenceSet {
+		cfg.Profile.AIRouteInference = flags.AIRouteInference
+	}
+	if flags.AIDependencyInferenceSet {
+		cfg.Profile.AIDependencyInference = flags.AIDependencyInference
+	}
+	if flags.RequireAISet {
+		cfg.Profile.RequireAI = flags.RequireAI
+	}
+	if flags.AutoApplySet {
+		cfg.Profile.AutoApply = flags.AutoApply
+	}
 }
 
 func filterRoutes(routes []discovery.Route, include, ignore []string) []discovery.Route {
@@ -660,6 +752,57 @@ func filterRoutes(routes []discovery.Route, include, ignore []string) []discover
 		out = append(out, r)
 	}
 	return out
+}
+
+func mergeRoutes(base []discovery.Route, inferred []discovery.Route) ([]discovery.Route, int) {
+	seen := map[string]bool{}
+	for _, r := range base {
+		seen[routeKey(r)] = true
+	}
+	merged := append([]discovery.Route{}, base...)
+	added := 0
+	for _, r := range inferred {
+		r.Method = strings.ToUpper(strings.TrimSpace(r.Method))
+		if r.Method == "" {
+			r.Method = "ANY"
+		}
+		r.Path = strings.TrimSpace(r.Path)
+		if r.Path == "" {
+			continue
+		}
+		if !strings.HasPrefix(r.Path, "/") {
+			r.Path = "/" + r.Path
+		}
+		key := routeKey(r)
+		if seen[key] {
+			continue
+		}
+		if strings.TrimSpace(r.ID) == "" {
+			r.ID = inferredID(r)
+		}
+		seen[key] = true
+		merged = append(merged, r)
+		added++
+	}
+	return merged, added
+}
+
+func routeKey(r discovery.Route) string {
+	file := strings.ToLower(strings.TrimSpace(r.File))
+	method := strings.ToLower(strings.TrimSpace(r.Method))
+	path := strings.ToLower(strings.TrimSpace(r.Path))
+	if file == "" {
+		return method + "|" + path
+	}
+	return file + "|" + method + "|" + path
+}
+
+func inferredID(r discovery.Route) string {
+	method := strings.ToLower(strings.TrimSpace(r.Method))
+	if method == "" {
+		method = "any"
+	}
+	return "ai:" + method + ":" + strings.TrimSpace(r.Path)
 }
 
 func dependentRoutes(deps map[string][]string, routeID string) []string {
@@ -778,6 +921,22 @@ func chain(items []string) string {
 		return "default"
 	}
 	return strings.Join(items, " -> ")
+}
+
+func aiFailureReason(err error) string {
+	msg := strings.ToLower(strings.TrimSpace(err.Error()))
+	switch {
+	case strings.Contains(msg, "missing openai api key"):
+		return "missing API key"
+	case strings.Contains(msg, "http 400"), strings.Contains(msg, "http 401"), strings.Contains(msg, "http 403"), strings.Contains(msg, "model"):
+		return "request rejected (check model/key/permissions)"
+	case strings.Contains(msg, "timeout"), strings.Contains(msg, "deadline exceeded"):
+		return "request timed out"
+	case strings.Contains(msg, "http 5"):
+		return "OpenAI service error"
+	default:
+		return strings.TrimSpace(err.Error())
+	}
 }
 
 func missingDependencies(routes []discovery.Route, deps map[string][]string) []string {
