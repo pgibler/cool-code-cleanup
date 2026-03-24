@@ -172,6 +172,8 @@ Auto-apply allowed edits:
 ccc cleanup --auto-apply
 ```
 
+This is best paired with a dry-run first when testing a new ruleset.
+
 Create branch and commit at final step:
 
 ```bash
