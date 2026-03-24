@@ -64,6 +64,8 @@ Use a custom global config:
 ccc cleanup --global-config ~/.config/ccc/config.json
 ```
 
+This is useful when you want to test authentication or model settings without changing the default global config.
+
 Enable safe mode explicitly:
 
 ```bash
